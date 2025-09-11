@@ -1,21 +1,19 @@
 # Global data directory for checkpoints/state
 data_dir = "/var/lib/vector"
 
-# Thu thập toàn bộ system logs
-[sources.system_logs]
+# Thu thập chỉ system logs quan trọng (không tất cả)
+[sources.system_logs]  
 type = "file"
-include = ["/var/log/**/*.log", "/var/log/syslog", "/var/log/auth.log", "/var/log/messages"]
-ignore_older_secs = 0
-read_from = "beginning"
+include = ["/var/log/auth.log", "/var/log/syslog"]
+ignore_older_secs = 30
+read_from = "end"
 
-# Thu thập command execution logs
-[sources.command_logs]
-type = "exec"
-command = ["bash", "-c", "lastb -n 100 2>/dev/null || echo 'no btmp'; last -n 100 2>/dev/null || echo 'no wtmp'"]
-mode = "scheduled"
-
-[sources.command_logs.scheduled]
-exec_interval_secs = 10
+# Thu thập chỉ auth logs real-time (không scheduled commands)
+[sources.auth_logs]
+type = "file"
+include = ["/var/log/auth.log"]
+ignore_older_secs = 30  
+read_from = "end"
 
 # Original events file (for manual testing)
 [sources.events]
@@ -25,10 +23,10 @@ ignore_older_secs = 0
 ignore_checkpoints = true
 read_from = "beginning"
 
-# Normalize tất cả logs thành Sigma-compatible format
+# Normalize tất cả logs thành Sigma-compatible format  
 [transforms.normalize_logs]
 type = "remap"
-inputs = ["system_logs", "command_logs"]
+inputs = ["system_logs", "auth_logs"]
 source = '''
 .timestamp = now()
 .hostname = "target-ubuntu"
