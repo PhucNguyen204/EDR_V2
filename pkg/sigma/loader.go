@@ -28,18 +28,29 @@ func LoadRuleYAML(b []byte) (RuleIR, error) {
 	for name, node := range rr.Detection {
 		if name == "condition" { continue }
 
-		switch v := node.(type) {
-		case map[string]any:
-			preds, err := parsePredicateMap(v)
-			if err != nil { return RuleIR{}, fmt.Errorf("selection %s: %w", name, err) }
-			selections[name] = Selection{
-				Name: name,
-				Groups: []SelectionGroup{
-					{Predicates: preds},
-				},
-			}
+	switch v := node.(type) {
+	case map[string]any:
+		preds, err := parsePredicateMap(v)
+		if err != nil { return RuleIR{}, fmt.Errorf("selection %s: %w", name, err) }
+		selections[name] = Selection{
+			Name: name,
+			Groups: []SelectionGroup{
+				{Predicates: preds},
+			},
+		}
 
-		case []any:
+	case []any:
+		// Two possibilities:
+		// - list of mappings => OR of AND groups (existing behavior)
+		// - list of scalars (keywords style) => match anywhere (__any field)
+		// Detect by inspecting the first non-nil item
+		isListOfMaps := true
+		for _, it := range v {
+			if it == nil { continue }
+			if _, ok := it.(map[string]any); !ok { isListOfMaps = false }
+			break
+		}
+		if isListOfMaps {
 			var groups []SelectionGroup
 			for i, item := range v {
 				m, ok := item.(map[string]any)
@@ -49,10 +60,36 @@ func LoadRuleYAML(b []byte) (RuleIR, error) {
 				groups = append(groups, SelectionGroup{Predicates: preds})
 			}
 			selections[name] = Selection{Name: name, Groups: groups}
+		} else {
+			// Treat as keywords list: any-of list present anywhere
+			preds := []SelectionPredicate{{
+				Field: "__any",
+				Op:    OpContains,
+				Value: v,
+			}}
+			selections[name] = Selection{
+				Name:   name,
+				Groups: []SelectionGroup{{Predicates: preds}},
+			}
+		}
 
+	default:
+		// Support scalar keywords: treat as single keyword present anywhere
+		switch vv := v.(type) {
+		case string, int, int64, float64, bool:
+			preds := []SelectionPredicate{{
+				Field: "__any",
+				Op:    OpContains,
+				Value: vv,
+			}}
+			selections[name] = Selection{
+				Name:   name,
+				Groups: []SelectionGroup{{Predicates: preds}},
+			}
 		default:
 			return RuleIR{}, fmt.Errorf("selection %s must be mapping or list", name)
 		}
+	}
 	}
 
 	cond, _ := rr.Detection["condition"].(string)

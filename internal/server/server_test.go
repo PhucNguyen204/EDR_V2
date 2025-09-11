@@ -181,6 +181,43 @@ func TestIngest_HealthCheck(t *testing.T) {
 	}
 }
 
+func TestStatsAfterIngest(t *testing.T) {
+    s := buildServer(t)
+    ts := httptest.NewServer(s.Router())
+    defer ts.Close()
+
+    // Send two events
+    evs := []map[string]any{
+        {"CommandLine": "Cannot run program: java.lang.ProcessBuilder"},
+        {"Image": `C:\\Program Files\\7-Zip\\7z.exe`, "CommandLine": `7z.exe a out.7z -pS3cret`},
+    }
+    var buf bytes.Buffer
+    _ = json.NewEncoder(&buf).Encode(evs)
+    req, _ := http.NewRequest("POST", ts.URL+"/ingest", &buf)
+    req.Header.Set("Content-Type", "application/json")
+    res, err := http.DefaultClient.Do(req)
+    if err != nil { t.Fatal(err) }
+    _ = res.Body.Close()
+
+    // Fetch stats
+    res2, err := http.Get(ts.URL+"/stats")
+    if err != nil { t.Fatal(err) }
+    defer res2.Body.Close()
+    if res2.StatusCode != http.StatusOK { t.Fatalf("stats status=%d", res2.StatusCode) }
+    var st struct {
+        TotalRequests uint64 `json:"total_requests"`
+        TotalAccepted uint64 `json:"total_accepted"`
+        TotalMatched  uint64 `json:"total_matched"`
+        Engine        struct{
+            Rules int `json:"rules"`
+        } `json:"engine"`
+    }
+    _ = json.NewDecoder(res2.Body).Decode(&st)
+    if st.TotalRequests == 0 || st.TotalAccepted != 2 {
+        t.Fatalf("unexpected stats: %+v", st)
+    }
+}
+
 func TestIngest_InvalidMethod(t *testing.T) {
 	s := buildServer(t)
 	ts := httptest.NewServer(s.Router())

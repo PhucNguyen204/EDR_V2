@@ -13,10 +13,10 @@ func TestCondition_SimpleID(t *testing.T) {
 func TestCondition_PrecedenceAndParens(t *testing.T) {
 	ctx := map[string]bool{"a": true, "b": false, "c": true}
 	// not > and > or
-	ok, _ := EvalCondition("a or b and not c", ctx) // true || (false && false) = true
+	ok, _ := EvalCondition("a or b and not c", ctx) 
 	if !ok { t.Fatalf("expected true") }
 
-	ok, _ = EvalCondition("a and (b or not c)", ctx) // true && (false || false) = false
+	ok, _ = EvalCondition("a and (b or not c)", ctx) 
 	if ok { t.Fatalf("expected false") }
 
 	ok, _ = EvalCondition("(a and not b) or (b and c)", ctx) // (true && true) || (false && true) = true
@@ -57,7 +57,6 @@ func TestCondition_Unknown_Unbalanced(t *testing.T) {
 }
 
 func TestCondition_WhitespaceAndOpsCase(t *testing.T) {
-	// ctx := map[string]bool{"S": true}
 	ok, _ := EvalCondition("  s  AnD  nOt ( s and  false_id ) ", map[string]bool{"s": true})
 	if !ok { t.Fatalf("whitespace/case handling failed") }
 }

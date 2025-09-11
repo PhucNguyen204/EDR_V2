@@ -1,0 +1,88 @@
+# Global data directory for checkpoints/state
+data_dir = "/var/lib/vector"
+
+# Thu thập toàn bộ system logs
+[sources.system_logs]
+type = "file"
+include = ["/var/log/**/*.log", "/var/log/syslog", "/var/log/auth.log", "/var/log/messages"]
+ignore_older_secs = 0
+read_from = "beginning"
+
+# Thu thập command execution logs
+[sources.command_logs]
+type = "exec"
+command = ["bash", "-c", "lastb -n 100 2>/dev/null || echo 'no btmp'; last -n 100 2>/dev/null || echo 'no wtmp'"]
+mode = "scheduled"
+
+[sources.command_logs.scheduled]
+exec_interval_secs = 10
+
+# Original events file (for manual testing)
+[sources.events]
+type = "file"
+include = ["/data/events.ndjson"]
+ignore_older_secs = 0
+ignore_checkpoints = true
+read_from = "beginning"
+
+# Normalize tất cả logs thành Sigma-compatible format
+[transforms.normalize_logs]
+type = "remap"
+inputs = ["system_logs", "command_logs"]
+source = '''
+.timestamp = now()
+.hostname = "target-ubuntu"
+
+# Set default Sigma fields
+.Image = "/bin/unknown"
+.CommandLine = string!(.message)
+.ProcessId = 1000
+.ParentProcessId = 1
+.User = "unknown"
+
+# Parse SSH brute force
+if contains(string!(.message), "ssh:notty") {
+  parts = split(string!(.message), " ")
+  if length(parts) > 0 {
+    .User = parts[0]
+  }
+  .Image = "/usr/sbin/sshd"
+  .CommandLine = "ssh connection attempt"
+}
+'''
+
+# Parse JSON events (for manual testing)
+[transforms.parse_json]
+type   = "remap"
+inputs = ["events"]
+source = '''
+if exists(.message) && is_string(.message) {
+  structured, err = parse_json(.message)
+  if err == null && is_object(structured) {
+    . = structured
+  } else {
+    .Message = .message
+  }
+} else if !is_object(.) {
+  .Message = to_string!(.)
+}
+'''
+
+[sinks.edr_http]
+type = "http"
+inputs = ["normalize_logs", "parse_json"]
+uri = "${EDR_SERVER_URL}"
+method = "post"
+
+[sinks.edr_http.encoding]
+codec = "json"
+
+[sinks.edr_http.request]
+retry_max_duration_secs = 300
+
+[sinks.edr_http.batch]
+max_events = 1000
+timeout_secs = 1
+
+[sinks.edr_http.compression]
+algorithm = "gzip"

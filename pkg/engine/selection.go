@@ -43,6 +43,31 @@ func normalizeWindash(s string) string {
 	return r.Replace(s)
 }
 
+// walkAllValues traverses the event recursively and calls fn for each scalar value found.
+func walkAllValues(v any, fn func(any)) {
+    switch t := v.(type) {
+    case map[string]any:
+        for _, vv := range t { walkAllValues(vv, fn) }
+    case []any:
+        for _, it := range t { walkAllValues(it, fn) }
+    default:
+        fn(t)
+    }
+}
+
+// anyStringMatch checks if any string-serializable value in the event matches the pattern/op/mods.
+func anyStringMatch(event map[string]any, pattern string, op sigma.Operator, mods sigma.PredicateModifiers) bool {
+    matched := false
+    walkAllValues(event, func(v any) {
+        if matched { return }
+        s := toString(v)
+        if matchStringWithOp(s, pattern, op, mods) {
+            matched = true
+        }
+    })
+    return matched
+}
+
 // --- base64/wide helpers ---
 
 func toUTF16LEBytes(s string) []byte {
@@ -141,7 +166,38 @@ func parseFloat(v any) (float64, bool) {
 }
 
 func matchPredicate(event map[string]any, p sigma.SelectionPredicate, fm sigma.FieldMapping) bool {
-	field := fm.Resolve(p.Field)
+    // Special field "__any": keyword search across all fields
+    if p.Field == "__any" {
+        // List values
+        if arr, ok := p.Value.([]any); ok {
+            if p.Modifiers.RequireAllVals {
+                for _, it := range arr {
+                    patt := toString(it)
+                    okAny := false
+                    for _, enc := range patternsWithEncoding(patt, p.Modifiers) {
+                        if anyStringMatch(event, enc, p.Op, p.Modifiers) { okAny = true; break }
+                    }
+                    if !okAny { return false }
+                }
+                return true
+            }
+            // any-of
+            for _, it := range arr {
+                patt := toString(it)
+                for _, enc := range patternsWithEncoding(patt, p.Modifiers) {
+                    if anyStringMatch(event, enc, p.Op, p.Modifiers) { return true }
+                }
+            }
+            return false
+        }
+        // Scalar value
+        for _, enc := range patternsWithEncoding(toString(p.Value), p.Modifiers) {
+            if anyStringMatch(event, enc, p.Op, p.Modifiers) { return true }
+        }
+        return false
+    }
+
+    field := fm.Resolve(p.Field)
 
 	// exists: đặc biệt (không cần lấy giá trị)
 	if p.Op == sigma.OpExists {

@@ -13,7 +13,7 @@ type acNode struct {
 
 type AhoCorasick struct {
 	nodes    []acNode
-	patterns []string   // pattern gốc (lowercased)
+	patterns []string   // pattern 
 }
 
 // NewAC: build trie + failure links (BFS)

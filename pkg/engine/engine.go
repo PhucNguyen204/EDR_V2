@@ -11,7 +11,7 @@ type CompiledRule struct {
 }
 
 type Engine struct {
-	fm sigma.FieldMapping
+    fm sigma.FieldMapping
 
 	// prefilter
 	ac          *AhoCorasick
@@ -20,6 +20,12 @@ type Engine struct {
 
 	// full set
 	rules map[string]CompiledRule
+}
+
+type EngineStats struct {
+    Rules            int
+    RulesNoLiterals  int
+    LiteralPatterns  int
 }
 
 // Compile: build prefilter trên toàn bộ rules
@@ -56,6 +62,16 @@ func Compile(rules []sigma.RuleIR, fm sigma.FieldMapping) *Engine {
 		e.ac = NewAC(pats)
 	}
 	return e
+}
+
+// Stats returns basic compile-time stats for debugging/metrics.
+func (e *Engine) Stats() EngineStats {
+    s := EngineStats{
+        Rules:           len(e.rules),
+        RulesNoLiterals: len(e.rulesNoLits),
+    }
+    if e.ac != nil { s.LiteralPatterns = len(e.ac.patterns) }
+    return s
 }
 
 // Flatten tất cả giá trị chuỗi trong event (đơn giản, đủ cho prefilter)
@@ -118,10 +134,11 @@ func (e *Engine) Evaluate(event map[string]any) ([]string, error) {
 		for name, sel := range r.Selections {
 			ctx[name] = evalSelection(event, sel, e.fm)
 		}
-		ok, err := EvalCondition(r.Condition, ctx)
-		if err != nil {
-			return nil, err
-		}
+        ok, err := EvalCondition(r.Condition, ctx)
+        if err != nil {
+            // Skip rules with invalid/unsupported condition instead of failing whole event
+            continue
+        }
 		if ok {
 			out = append(out, rid)
 		}

@@ -1,0 +1,13 @@
+FROM timberio/vector:0.39.0-debian AS vector_src
+
+FROM ubuntu:22.04
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
+# Copy Vector binary from official Debian-based image to Ubuntu
+COPY --from=vector_src /usr/bin/vector /usr/local/bin/vector
+# Ensure default data dir exists for checkpoints
+RUN mkdir -p /var/lib/vector
+ENV EDR_SERVER_URL=http://edr-server:8080/ingest
+VOLUME ["/data"]
+ENTRYPOINT ["/usr/local/bin/vector"]
+CMD ["--config", "/etc/vector/vector.toml"]
