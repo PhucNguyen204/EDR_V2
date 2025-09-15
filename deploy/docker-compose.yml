@@ -1,31 +1,26 @@
+version: '3.9'
 services:
-  edr-server:
-    build:
-      context: ..
-      dockerfile: build/Dockerfile.server
+  postgres:
+    image: postgres:15
     environment:
-      - EDR_RULES_DIR=/rules
-      - EDR_SERVER_ADDR=:8080
-      - EDR_SERVER_LOG_INGEST=1
-    # Map container port 8080 to a RANDOM host port to avoid collisions
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: edr
     ports:
-      - "127.0.0.1::8080"
-
-  ubuntu-agent:
-    build:
-      context: ..
-      dockerfile: build/Dockerfile.ubuntu-vector
-    depends_on:
-      - edr-server
-    environment:
-      - EDR_SERVER_URL=http://edr-server:8080/ingest
+      - "5432:5432"
     volumes:
-      - ./vector/vector_config.toml:/etc/vector/vector.toml:ro
-      - events_data:/data
-      - vector_data:/var/lib/vector
-    command: ["--config", "/etc/vector/vector.toml"]
-    restart: on-failure
-
+      - pgdata:/var/lib/postgresql/data
+  edr:
+    build: ..
+    environment:
+      - EDR_DB_DSN=postgres://postgres:postgres@postgres:5432/edr?sslmode=disable
+      - EDR_ADDR=:8080
+      - EDR_RULES_PATH=/rules
+    ports:
+      - "8080:8080"
+    depends_on:
+      - postgres
+    volumes:
+      - ../rules:/rules:ro
 volumes:
-  events_data: {}
-  vector_data: {}
+  pgdata:

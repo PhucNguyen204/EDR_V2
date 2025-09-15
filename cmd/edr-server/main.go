@@ -1,65 +1,73 @@
 package main
 
 import (
-    "log"
-    "net"
-    "net/http"
-    "os"
-    "strings"
+	"context"
+	"database/sql"
+	"log"
+	"net/http"
+	"os"
+	"time"
 
-    "github.com/PhucNguyen204/EDR_V2/internal/rules"
-    "github.com/PhucNguyen204/EDR_V2/internal/server"
-    "github.com/PhucNguyen204/EDR_V2/pkg/engine"
-    "github.com/PhucNguyen204/EDR_V2/pkg/sigma"
+	_ "github.com/lib/pq"
+
+	"github.com/PhucNguyen204/EDR_V2/engine_sigma_by_golang/compiler"
+	"github.com/PhucNguyen204/EDR_V2/engine_sigma_by_golang/dag"
+	srv "github.com/PhucNguyen204/EDR_V2/internal/server"
 )
 
+func getenv(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
 
 func main() {
-	ruleDir := os.Getenv("EDR_RULES_DIR")
-	if ruleDir == "" { log.Fatal("EDR_RULES_DIR not set") }
+	addr := getenv("EDR_ADDR", ":8080")
+	dsn := getenv("EDR_DB_DSN", "postgres://postgres:postgres@localhost:5432/edr?sslmode=disable")
+	// Optional rules path
+	rulesPath := os.Getenv("EDR_RULES_PATH")
+	if rulesPath == "" {
+		if st, err := os.Stat("./rules"); err == nil && st.IsDir() {
+			rulesPath = "./rules"
+		}
+	}
 
-	rs, err := rules.LoadDirRecursive(ruleDir)
-	if err != nil { log.Fatalf("load rules: %v", err) }
+	db, err := sql.Open("postgres", dsn)
+	if err != nil {
+		log.Fatalf("open db: %v", err)
+	}
+	db.SetMaxOpenConns(10)
+	db.SetMaxIdleConns(5)
+	db.SetConnMaxLifetime(30 * time.Minute)
+	if err := db.Ping(); err != nil {
+		log.Fatalf("ping db: %v", err)
+	}
 
-	// Mapping “chuẩn” (UEDS). Bạn có thể mở rộng thêm khi cần.
-	fm := sigma.NewFieldMapping(map[string]string{
-		"Image":"Image","CommandLine":"CommandLine",
-		"Description":"Description","OriginalFileName":"OriginalFileName",
-		"ProcessImage":"Image","ProcessCommandLine":"CommandLine",
-		"ParentImage":"ParentImage","ParentCommandLine":"ParentCommandLine",
-		"CurrentDirectory":"CurrentDirectory","User":"User","UserName":"UserName",
-		"IntegrityLevel":"IntegrityLevel",
-		"TargetObject":"registry.path","Details":"registry.value",
-		"TargetFilename":"file.path","ImageLoaded":"file.loaded",
-		"DestinationIp":"network.dst.ip","DestinationPort":"network.dst.port",
-		"SourceIp":"network.src.ip","SourcePort":"network.src.port",
-		"destination.ip":"network.dst.ip","destination.port":"network.dst.port",
-		"source.ip":"network.src.ip","source.port":"network.src.port",
-		"file.path":"file.path","file.name":"file.name","file.extension":"file.extension",
-		"registry.key":"registry.path","registry.path":"registry.path","registry.value":"registry.value",
-		"process.executable":"Image","process.command_line":"CommandLine",
-		"process.commandline":"CommandLine","process.name":"Image",
-		"process.parent.executable":"ParentImage","process.parent.command_line":"ParentCommandLine",
-		"message":"Message","Msg":"Message",
-		"ScriptBlockText":"powershell.script_block",
-	})
+	// Initialize empty engine first
+	engine, err := dag.FromRuleset(compiler.New().IntoRuleset(), dag.DefaultEngineConfig())
+	if err != nil {
+		log.Fatalf("init engine: %v", err)
+	}
 
-    eng := engine.Compile(rs, fm)
-    st := eng.Stats()
-    log.Printf("Compiled rules: %d (no-literals: %d), prefilter literals: %d", st.Rules, st.RulesNoLiterals, st.LiteralPatterns)
-    app := server.NewAppServer(eng)
+	// Create server
+	server := srv.NewAppServer(db, engine)
+	if err := server.InitSchema(); err != nil {
+		log.Fatalf("init schema: %v", err)
+	}
+	if rulesPath != "" {
+		if loaded, skipped, err := server.LoadRulesFromDir(context.Background(), rulesPath); err != nil {
+			log.Printf("failed to load rules from %s: %v", rulesPath, err)
+		} else {
+			log.Printf("loaded rules from %s: loaded=%d skipped=%d", rulesPath, loaded, skipped)
+		}
+	}
 
+	mux := http.NewServeMux()
+	server.RegisterRoutes(mux)
 
-    addr := strings.TrimSpace(os.Getenv("EDR_SERVER_ADDR"))
-    if addr == "" {
-        if p := strings.TrimSpace(os.Getenv("PORT")); p != "" {
-            if strings.HasPrefix(p, ":") { addr = p } else { addr = ":" + p }
-        }
-    }
-    if addr == "" { addr = ":8080" }
-
-    ln, err := net.Listen("tcp", addr)
-    if err != nil { log.Fatalf("listen %s: %v", addr, err) }
-    log.Printf("EDR server listening on %s", ln.Addr().String())
-    log.Fatal(http.Serve(ln, app.Router()))
+	log.Printf("EDR server listening on %s", addr)
+	if err := http.ListenAndServe(addr, mux); err != nil {
+		log.Fatalf("listen: %v", err)
+	}
 }
