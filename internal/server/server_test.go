@@ -69,9 +69,9 @@ func TestIngestNonMatching(t *testing.T) {
     _, mux := makeServer(t, db, eng)
     // No need to init schema in test
 
-    // Expect endpoint upsert and event insert
+    // Expect endpoint upsert and event insert (RETURNING id)
     mock.ExpectExec("INSERT INTO endpoints").WillReturnResult(sqlmock.NewResult(0, 1))
-    mock.ExpectExec("INSERT INTO events").WillReturnResult(sqlmock.NewResult(0, 1))
+    mock.ExpectQuery("INSERT INTO events").WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(1001))
 
     // Non-matching event: different image / cmdline
     ev := map[string]any{
@@ -99,7 +99,7 @@ func TestIngestMatching(t *testing.T) {
 
     // Expect endpoint upsert, event insert, and detection insert
     mock.ExpectExec("INSERT INTO endpoints").WillReturnResult(sqlmock.NewResult(0, 1))
-    mock.ExpectExec("INSERT INTO events").WillReturnResult(sqlmock.NewResult(0, 1))
+    mock.ExpectQuery("INSERT INTO events").WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(1002))
     mock.ExpectExec("INSERT INTO detections").WillReturnResult(sqlmock.NewResult(0, 1))
 
     // Matching event (note: compiler normalized Process* to runtime fields; runtime expects Image/CommandLine)
@@ -127,9 +127,9 @@ func TestIngestBatchMixed(t *testing.T) {
 
     // Expect two upserts and two event inserts; one detection
     mock.ExpectExec("INSERT INTO endpoints").WillReturnResult(sqlmock.NewResult(0, 1))
-    mock.ExpectExec("INSERT INTO events").WillReturnResult(sqlmock.NewResult(0, 1))
+    mock.ExpectQuery("INSERT INTO events").WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(1003))
     mock.ExpectExec("INSERT INTO endpoints").WillReturnResult(sqlmock.NewResult(0, 1))
-    mock.ExpectExec("INSERT INTO events").WillReturnResult(sqlmock.NewResult(0, 1))
+    mock.ExpectQuery("INSERT INTO events").WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(1004))
     mock.ExpectExec("INSERT INTO detections").WillReturnResult(sqlmock.NewResult(0, 1))
 
     payload := []map[string]any{
@@ -180,6 +180,8 @@ func TestRulesReplace(t *testing.T) {
 
     // New rules payload (simple equals on EventID)
     body := []byte(`{"rules":["title: R\ndetection:\n  selection:\n    EventID: 4624\n  condition: selection\n"]}`)
+    // Expect upsert into rules once
+    mock.ExpectExec("INSERT INTO rules").WillReturnResult(sqlmock.NewResult(0, 1))
     req := httptest.NewRequest(http.MethodPost, "/api/v1/rules", bytes.NewReader(body))
     req.Header.Set("Content-Type", "application/json")
     rr := httptest.NewRecorder()

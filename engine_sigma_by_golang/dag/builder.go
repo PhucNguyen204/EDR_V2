@@ -49,7 +49,7 @@ func (b *DagBuilder) FromRuleset(ruleset *ir.CompiledRuleset) *DagBuilder {
         if err != nil { continue }
         ast, err := compiler.ParseTokens(tokens, rule.Selections)
         if err != nil { continue }
-        rootID, err := b.buildConditionSubgraph(ast, rule.Selections)
+        rootID, err := b.buildConditionSubgraph(ast, rule.Selections, rule.Disjunctions)
         if err != nil { continue }
         res := b.createResultNode(rule.RuleId)
         b.addDependency(res, rootID)
@@ -142,70 +142,127 @@ func (b *DagBuilder) GetNode(id NodeId) (*DagNode, bool) {
     return &b.nodes[id], true
 }
 
-func (b *DagBuilder) buildConditionSubgraph(ast *compiler.ConditionAst, sel map[string][]ir.PrimitiveId) (NodeId, error) {
+func (b *DagBuilder) buildConditionSubgraph(ast *compiler.ConditionAst, sel map[string][]ir.PrimitiveId, disj map[string][][]ir.PrimitiveId) (NodeId, error) {
     switch ast.Kind {
     case compiler.AstIdentifier:
-        pids, ok := sel[ast.Name]
-        if !ok { return 0, fmt.Errorf("Unknown selection: %s", ast.Name) }
-        if len(pids) == 0 { return 0, fmt.Errorf("Empty selection: %s", ast.Name) }
-        if len(pids) == 1 { return b.ensurePrimitiveNode(pids[0]), nil }
-        and := b.createLogicalNode(LogicalAnd)
-        for _, pid := range pids { b.addDependency(and, b.ensurePrimitiveNode(pid)) }
-        return and, nil
+        // Merge Disjunctions (OR-of-AND groups) với Selections (AND group) nếu cả hai cùng tồn tại
+        merged := make([][]ir.PrimitiveId, 0)
+        if groups, ok := disj[ast.Name]; ok && len(groups) > 0 {
+            merged = append(merged, groups...)
+        }
+        if pids, ok := sel[ast.Name]; ok && len(pids) > 0 {
+            grp := append([]ir.PrimitiveId(nil), pids...)
+            merged = append(merged, grp)
+        }
+        if len(merged) == 0 {
+            return 0, fmt.Errorf("Unknown or empty selection: %s", ast.Name)
+        }
+        return b.buildOrOfAnd(merged), nil
     case compiler.AstAnd:
-        ln, err := b.buildConditionSubgraph(ast.Left, sel); if err != nil { return 0, err }
-        rn, err := b.buildConditionSubgraph(ast.Right, sel); if err != nil { return 0, err }
+        ln, err := b.buildConditionSubgraph(ast.Left, sel, disj); if err != nil { return 0, err }
+        rn, err := b.buildConditionSubgraph(ast.Right, sel, disj); if err != nil { return 0, err }
         and := b.createLogicalNode(LogicalAnd)
         b.addDependency(and, ln)
         b.addDependency(and, rn)
         return and, nil
     case compiler.AstOr:
-        ln, err := b.buildConditionSubgraph(ast.Left, sel); if err != nil { return 0, err }
-        rn, err := b.buildConditionSubgraph(ast.Right, sel); if err != nil { return 0, err }
+        ln, err := b.buildConditionSubgraph(ast.Left, sel, disj); if err != nil { return 0, err }
+        rn, err := b.buildConditionSubgraph(ast.Right, sel, disj); if err != nil { return 0, err }
         or := b.createLogicalNode(LogicalOr)
         b.addDependency(or, ln)
         b.addDependency(or, rn)
         return or, nil
     case compiler.AstNot:
-        on, err := b.buildConditionSubgraph(ast.Operand, sel); if err != nil { return 0, err }
+        on, err := b.buildConditionSubgraph(ast.Operand, sel, disj); if err != nil { return 0, err }
         not := b.createLogicalNode(LogicalNot)
         b.addDependency(not, on)
         return not, nil
     case compiler.AstOneOfThem:
+        // OR across selection nodes (each selection node is OR-of-AND or AND-of-primitives)
         or := b.createLogicalNode(LogicalOr)
         any := false
-        keys := make([]string, 0, len(sel))
-        for k := range sel { keys = append(keys, k) }
+        names := make(map[string]struct{}, len(sel)+len(disj))
+        for k := range sel { names[k] = struct{}{} }
+        for k := range disj { names[k] = struct{}{} }
+        keys := make([]string, 0, len(names))
+        for k := range names { keys = append(keys, k) }
         sort.Strings(keys)
-        for _, k := range keys {
-            for _, pid := range sel[k] {
-                b.addDependency(or, b.ensurePrimitiveNode(pid))
+        for _, name := range keys {
+            // prefer disjunctions when present
+            if groups, ok := disj[name]; ok && len(groups) > 0 {
+                node := b.buildOrOfAnd(groups)
+                b.addDependency(or, node)
+                any = true
+                continue
+            }
+            if pids, ok := sel[name]; ok && len(pids) > 0 {
+                if len(pids) == 1 {
+                    b.addDependency(or, b.ensurePrimitiveNode(pids[0]))
+                } else {
+                    andSel := b.createLogicalNode(LogicalAnd)
+                    for _, pid := range pids { b.addDependency(andSel, b.ensurePrimitiveNode(pid)) }
+                    b.addDependency(or, andSel)
+                }
                 any = true
             }
         }
-        if !any { return 0, fmt.Errorf("No primitives found for 'one of them'") }
+        if !any { return 0, fmt.Errorf("No selections found for 'one of them'") }
         return or, nil
     case compiler.AstAllOfThem:
+        // AND across selection nodes (each selection node is OR-of-AND or AND-of-primitives)
         and := b.createLogicalNode(LogicalAnd)
         any := false
-        keys := make([]string, 0, len(sel))
-        for k := range sel { keys = append(keys, k) }
+        names := make(map[string]struct{}, len(sel)+len(disj))
+        for k := range sel { names[k] = struct{}{} }
+        for k := range disj { names[k] = struct{}{} }
+        keys := make([]string, 0, len(names))
+        for k := range names { keys = append(keys, k) }
         sort.Strings(keys)
-        for _, k := range keys {
-            for _, pid := range sel[k] {
-                b.addDependency(and, b.ensurePrimitiveNode(pid))
+        for _, name := range keys {
+            if groups, ok := disj[name]; ok && len(groups) > 0 {
+                node := b.buildOrOfAnd(groups)
+                b.addDependency(and, node)
+                any = true
+                continue
+            }
+            if pids, ok := sel[name]; ok && len(pids) > 0 {
+                if len(pids) == 1 {
+                    b.addDependency(and, b.ensurePrimitiveNode(pids[0]))
+                } else {
+                    andSel := b.createLogicalNode(LogicalAnd)
+                    for _, pid := range pids { b.addDependency(andSel, b.ensurePrimitiveNode(pid)) }
+                    b.addDependency(and, andSel)
+                }
                 any = true
             }
         }
-        if !any { return 0, fmt.Errorf("No primitives found for 'all of them'") }
+        if !any { return 0, fmt.Errorf("No selections found for 'all of them'") }
         return and, nil
     case compiler.AstAllOfPattern:
         and := b.createLogicalNode(LogicalAnd)
         matched := false
-        for name, pids := range sel {
-            if containsPattern(name, ast.Pattern) {
-                for _, pid := range pids {
-                    b.addDependency(and, b.ensurePrimitiveNode(pid))
+        names := make(map[string]struct{}, len(sel)+len(disj))
+        for k := range sel { names[k] = struct{}{} }
+        for k := range disj { names[k] = struct{}{} }
+        keys := make([]string, 0, len(names))
+        for k := range names { keys = append(keys, k) }
+        sort.Strings(keys)
+        for _, name := range keys {
+            if !containsPattern(name, ast.Pattern) { continue }
+            if groups, ok := disj[name]; ok && len(groups) > 0 {
+                node := b.buildOrOfAnd(groups)
+                b.addDependency(and, node)
+                matched = true
+                continue
+            }
+            if pids, ok := sel[name]; ok {
+                if len(pids) == 1 {
+                    b.addDependency(and, b.ensurePrimitiveNode(pids[0]))
+                    matched = true
+                } else if len(pids) > 1 {
+                    subAnd := b.createLogicalNode(LogicalAnd)
+                    for _, pid := range pids { b.addDependency(subAnd, b.ensurePrimitiveNode(pid)) }
+                    b.addDependency(and, subAnd)
                     matched = true
                 }
             }
@@ -213,7 +270,40 @@ func (b *DagBuilder) buildConditionSubgraph(ast *compiler.ConditionAst, sel map[
         if !matched { return 0, fmt.Errorf("No selections found matching pattern: %s", ast.Pattern) }
         return and, nil
     case compiler.AstCountOfPattern:
-        // Simplify as OR across matches (count ignored in this simplified builder)
+        // Proper handling for the common case: 1 of selection*
+        if ast.Count == 1 {
+            // OR across selection nodes (each selection node is OR-of-AND or AND-of-primitives)
+            or := b.createLogicalNode(LogicalOr)
+            matched := false
+            names := make(map[string]struct{}, len(sel)+len(disj))
+            for k := range sel { names[k] = struct{}{} }
+            for k := range disj { names[k] = struct{}{} }
+            keys := make([]string, 0, len(names))
+            for k := range names { keys = append(keys, k) }
+            sort.Strings(keys)
+            for _, name := range keys {
+                if !containsPattern(name, ast.Pattern) { continue }
+                if groups, ok := disj[name]; ok && len(groups) > 0 {
+                    node := b.buildOrOfAnd(groups)
+                    b.addDependency(or, node)
+                    matched = true
+                    continue
+                }
+                if pids, ok := sel[name]; ok && len(pids) > 0 {
+                    if len(pids) == 1 {
+                        b.addDependency(or, b.ensurePrimitiveNode(pids[0]))
+                    } else {
+                        andSel := b.createLogicalNode(LogicalAnd)
+                        for _, pid := range pids { b.addDependency(andSel, b.ensurePrimitiveNode(pid)) }
+                        b.addDependency(or, andSel)
+                    }
+                    matched = true
+                }
+            }
+            if !matched { return 0, fmt.Errorf("No selections found matching pattern: %s", ast.Pattern) }
+            return or, nil
+        }
+        // Fallback: simplify as OR across primitives (count ignored)
         or := b.createLogicalNode(LogicalOr)
         matched := false
         for name, pids := range sel {
@@ -229,6 +319,31 @@ func (b *DagBuilder) buildConditionSubgraph(ast *compiler.ConditionAst, sel map[
     default:
         return 0, fmt.Errorf("Unsupported AST kind")
     }
+}
+
+// buildOrOfAnd constructs an OR of AND-groups from disjunctions
+func (b *DagBuilder) buildOrOfAnd(groups [][]ir.PrimitiveId) NodeId {
+    if len(groups) == 0 {
+        return b.createLogicalNode(LogicalOr)
+    }
+    if len(groups) == 1 {
+        g := groups[0]
+        if len(g) == 1 { return b.ensurePrimitiveNode(g[0]) }
+        and := b.createLogicalNode(LogicalAnd)
+        for _, pid := range g { b.addDependency(and, b.ensurePrimitiveNode(pid)) }
+        return and
+    }
+    or := b.createLogicalNode(LogicalOr)
+    for _, g := range groups {
+        if len(g) == 1 {
+            b.addDependency(or, b.ensurePrimitiveNode(g[0]))
+            continue
+        }
+        and := b.createLogicalNode(LogicalAnd)
+        for _, pid := range g { b.addDependency(and, b.ensurePrimitiveNode(pid)) }
+        b.addDependency(or, and)
+    }
+    return or
 }
 
 func containsPattern(name, pattern string) bool {

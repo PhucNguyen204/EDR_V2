@@ -11,8 +11,15 @@ import (
 
 	ac "github.com/petar-dambovaliev/aho-corasick" 
 
-	engine "github.com/PhucNguyen204/EDR_V2/engine_sigma_by_golang"
+    engine "github.com/PhucNguyen204/EDR_V2/engine_sigma_by_golang"
 )
+
+// Prefilter interface for aho build
+type Prefilter interface {
+    MatchesJSON(any) bool
+    MatchesRaw(string) bool
+    Stats() PrefilterStats
+}
 
 //
 // High-performance literal prefilter for DAG optimization.

@@ -3,6 +3,7 @@ package compiler
 import (
     "fmt"
     "strconv"
+    "strings"
 
     ir "github.com/PhucNguyen204/EDR_V2/engine_sigma_by_golang"
     yaml "gopkg.in/yaml.v3"
@@ -14,6 +15,7 @@ type Compiler struct {
     primitives          []ir.Primitive
     nextPrimitiveId     ir.PrimitiveId
     currentSelectionMap map[string][]ir.PrimitiveId
+    currentSelectionOr  map[string][][]ir.PrimitiveId
     fieldMapping        FieldMapping
     nextRuleId          ir.RuleId
     compiledRules       []ir.CompiledRule
@@ -26,6 +28,7 @@ func New() *Compiler {
         primitives:          make([]ir.Primitive, 0),
         nextPrimitiveId:     0,
         currentSelectionMap: make(map[string][]ir.PrimitiveId),
+        currentSelectionOr:  make(map[string][][]ir.PrimitiveId),
         fieldMapping:        NewFieldMapping(),
         nextRuleId:          0,
         compiledRules:       make([]ir.CompiledRule, 0),
@@ -46,6 +49,7 @@ func (c *Compiler) Primitives() []ir.Primitive { return append([]ir.Primitive(ni
 // CompileRule compiles a single YAML rule and appends to internal state.
 func (c *Compiler) CompileRule(ruleYAML string) (ir.RuleId, error) {
     c.currentSelectionMap = make(map[string][]ir.PrimitiveId)
+    c.currentSelectionOr = make(map[string][][]ir.PrimitiveId)
 
     var doc map[string]any
     if err := yaml.Unmarshal([]byte(ruleYAML), &doc); err != nil {
@@ -71,8 +75,17 @@ func (c *Compiler) CompileRule(ruleYAML string) (ir.RuleId, error) {
         if key == "condition" {
             continue
         }
-        if err := c.processSelectionFromYAML(key, val); err != nil {
-            return 0, err
+        switch tv := val.(type) {
+        case map[string]any:
+            if err := c.processSelectionFromYAML(key, tv); err != nil {
+                return 0, err
+            }
+        case []any:
+            if err := c.processSelectionListOfMaps(key, tv); err != nil {
+                return 0, err
+            }
+        default:
+            // ignore gracefully
         }
     }
 
@@ -88,13 +101,49 @@ func (c *Compiler) CompileRule(ruleYAML string) (ir.RuleId, error) {
         return 0, fmt.Errorf("CompilationError: Missing detection.condition")
     }
 
-    // record compiled rule
-    c.compiledRules = append(c.compiledRules, ir.CompiledRule{
-        RuleId:     rid,
-        Selections: copySelMap(c.currentSelectionMap),
-        Condition:  cond,
-    })
+    // Optional: gating by logsource for negative-only (starts with 'not') rules
+    // If condition begins with 'not', AND a gate selection based on logsource.product/category/service
+    if lsRaw, ok := doc["logsource"].(map[string]any); ok {
+        trimmed := strings.TrimSpace(cond)
+        lowered := strings.ToLower(trimmed)
+        if strings.HasPrefix(lowered, "not ") || lowered == "not" || strings.HasPrefix(lowered, "not(") {
+            gateName := "__logsource_gate"
+            gateIDs := make([]ir.PrimitiveId, 0, 3)
+            // Build equals primitives on event.product/category/service
+            if v, ok := lsRaw["product"].(string); ok && v != "" {
+                pid := c.getOrCreatePrimitive(ir.NewPrimitive("event.product", "equals", []string{v}, nil))
+                gateIDs = append(gateIDs, pid)
+            }
+            if v, ok := lsRaw["category"].(string); ok && v != "" {
+                pid := c.getOrCreatePrimitive(ir.NewPrimitive("event.category", "equals", []string{v}, nil))
+                gateIDs = append(gateIDs, pid)
+            }
+            if v, ok := lsRaw["service"].(string); ok && v != "" {
+                pid := c.getOrCreatePrimitive(ir.NewPrimitive("event.service", "equals", []string{v}, nil))
+                gateIDs = append(gateIDs, pid)
+            }
+            if len(gateIDs) > 0 {
+                c.currentSelectionMap[gateName] = gateIDs
+                cond = gateName + " and (" + cond + ")"
+            }
+        }
+    }
 
+    // record compiled rule
+    cr := ir.CompiledRule{
+        RuleId:       rid,
+        Selections:   copySelMap(c.currentSelectionMap),
+        Disjunctions: copyOrMap(c.currentSelectionOr),
+        Condition:    cond,
+    }
+    // extract optional metadata: title, description, level, id (string)
+    if v, ok := doc["title"].(string); ok { cr.Title = v }
+    if v, ok := doc["description"].(string); ok { cr.Description = v }
+    if v, ok := doc["level"].(string); ok { cr.Level = v }
+    // preserve original id as string when present
+    if v, ok := doc["id"]; ok { cr.RuleUID = fmt.Sprint(v) }
+    c.compiledRules = append(c.compiledRules, cr)
+    
     return rid, nil
 }
 
@@ -149,7 +198,34 @@ func (c *Compiler) processSelectionFromYAML(selectionName string, selectionValue
         // allow empty or wrong types to be ignored gracefully
         return nil
     }
+    ids, err := c.compileSelectionMap(m)
+    if err != nil {
+        return err
+    }
+    c.currentSelectionMap[selectionName] = ids
+    return nil
+}
 
+// processSelectionListOfMaps handles selection value as []map[string]any (OR giữa các map con)
+func (c *Compiler) processSelectionListOfMaps(selectionName string, arr []any) error {
+    groups := make([][]ir.PrimitiveId, 0)
+    for _, it := range arr {
+        m, ok := it.(map[string]any)
+        if !ok { continue }
+        ids, err := c.compileSelectionMap(m)
+        if err != nil { return err }
+        if len(ids) > 0 {
+            groups = append(groups, ids)
+        }
+    }
+    if len(groups) > 0 {
+        c.currentSelectionOr[selectionName] = append(c.currentSelectionOr[selectionName], groups...)
+    }
+    return nil
+}
+
+// compileSelectionMap compiles one mapping of field->value(s) into a slice of primitive IDs (AND semantics)
+func (c *Compiler) compileSelectionMap(m map[string]any) ([]ir.PrimitiveId, error) {
     ids := make([]ir.PrimitiveId, 0)
     for fieldKey, fieldVal := range m {
         baseField, matchType, modifiers := parseFieldWithModifiers(fieldKey)
@@ -178,12 +254,10 @@ func (c *Compiler) processSelectionFromYAML(selectionName string, selectionValue
                 ids = append(ids, pid)
             }
         default:
-            return fmt.Errorf("CompilationError: Unsupported field value type for '%s'", fieldKey)
+            return nil, fmt.Errorf("CompilationError: Unsupported field value type for '%s'", fieldKey)
         }
     }
-
-    c.currentSelectionMap[selectionName] = ids
-    return nil
+    return ids, nil
 }
 
 func (c *Compiler) getOrCreatePrimitive(p ir.Primitive) ir.PrimitiveId {
@@ -265,6 +339,18 @@ func copySelMap(m map[string][]ir.PrimitiveId) map[string][]ir.PrimitiveId {
     out := make(map[string][]ir.PrimitiveId, len(m))
     for k, v := range m {
         out[k] = append([]ir.PrimitiveId(nil), v...)
+    }
+    return out
+}
+
+func copyOrMap(m map[string][][]ir.PrimitiveId) map[string][][]ir.PrimitiveId {
+    out := make(map[string][][]ir.PrimitiveId, len(m))
+    for k, groups := range m {
+        cpGroups := make([][]ir.PrimitiveId, 0, len(groups))
+        for _, g := range groups {
+            cpGroups = append(cpGroups, append([]ir.PrimitiveId(nil), g...))
+        }
+        out[k] = cpGroups
     }
     return out
 }

@@ -175,3 +175,11 @@ func (e *DagEngine) Stats() (nodesEvaluated, primitiveEvaluations, prefilterHits
     if e == nil || e.evaluator == nil { return 0, 0, 0, 0 }
     return e.evaluator.Stats()
 }
+
+// PrefilterPatternCount returns how many literal patterns are loaded into the prefilter (0 if disabled).
+func (e *DagEngine) PrefilterPatternCount() int {
+    if e == nil || e.prefilter == nil { return 0 }
+    // Prefilter is implemented in both aho and stub builds with Stats()
+    st := e.prefilter.Stats()
+    return st.PatternCount
+}

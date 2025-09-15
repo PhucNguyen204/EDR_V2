@@ -7,12 +7,14 @@ import (
     "fmt"
     "log"
     "net/http"
+    "os"
     "strconv"
     "sync"
     "time"
 
     "github.com/PhucNguyen204/EDR_V2/engine_sigma_by_golang/compiler"
     "github.com/PhucNguyen204/EDR_V2/engine_sigma_by_golang/dag"
+    ir "github.com/PhucNguyen204/EDR_V2/engine_sigma_by_golang"
 )
 
 type AppServer struct {
@@ -20,10 +22,18 @@ type AppServer struct {
     engine  *dag.DagEngine
     mu      sync.RWMutex // protects engine swap
     evalMu  sync.Mutex   // serialize evaluator usage (not goroutine-safe)
+    ruleMeta map[uint32]RuleMeta // metadata by numeric RuleId
 }
 
 func NewAppServer(db *sql.DB, engine *dag.DagEngine) *AppServer {
-    return &AppServer{db: db, engine: engine}
+    return &AppServer{db: db, engine: engine, ruleMeta: make(map[uint32]RuleMeta)}
+}
+
+type RuleMeta struct {
+    UID   string
+    Title string
+    Level string
+    Desc  string
 }
 
 // RegisterRoutes wires HTTP handlers.
@@ -43,6 +53,22 @@ func (s *AppServer) currentEngine() *dag.DagEngine {
 
 func (s *AppServer) swapEngine(e *dag.DagEngine) {
     s.mu.Lock(); s.engine = e; s.mu.Unlock()
+}
+
+// SetRuleMetaFromRuleset populates in-memory metadata map from compiled ruleset
+func (s *AppServer) SetRuleMetaFromRuleset(rs *ir.CompiledRuleset) {
+    m := make(map[uint32]RuleMeta, len(rs.Rules))
+    for _, r := range rs.Rules {
+        m[uint32(r.RuleId)] = RuleMeta{
+            UID:   r.RuleUID,
+            Title: r.Title,
+            Level: r.Level,
+            Desc:  r.Description,
+        }
+    }
+    s.mu.Lock()
+    s.ruleMeta = m
+    s.mu.Unlock()
 }
 
 // ---- Handlers ----
@@ -94,11 +120,34 @@ func (s *AppServer) handleListDetections(w http.ResponseWriter, r *http.Request)
     rows, err := s.db.QueryContext(r.Context(), `SELECT id, occurred_at, endpoint_id, rule_id, rule_name, severity, confidence, context FROM detections ORDER BY id DESC LIMIT $1`, limit)
     if err != nil { writeErr(w, 500, err); return }
     defer rows.Close()
-    type det struct{ ID int64; OccurredAt time.Time; EndpointID string; RuleID int32; RuleName string; Severity string; Confidence float64; Context json.RawMessage }
+    type det struct{
+        ID int64 `json:"id"`
+        OccurredAt time.Time `json:"occurred_at"`
+        EndpointID string `json:"endpoint_id"`
+        RuleID int32 `json:"rule_id"`
+        RuleName string `json:"rule_name"`
+        Severity string `json:"severity"`
+        Confidence float64 `json:"confidence"`
+        Context json.RawMessage `json:"context"`
+        // Enriched from engine metadata
+        RuleUID string `json:"rule_uid,omitempty"`
+        RuleTitle string `json:"rule_title,omitempty"`
+        RuleLevel string `json:"rule_level,omitempty"`
+        RuleDescription string `json:"rule_description,omitempty"`
+    }
     out := []det{}
     for rows.Next() {
         var d det
         if err := rows.Scan(&d.ID, &d.OccurredAt, &d.EndpointID, &d.RuleID, &d.RuleName, &d.Severity, &d.Confidence, &d.Context); err != nil { writeErr(w, 500, err); return }
+        // enrich
+        s.mu.RLock()
+        if meta, ok := s.ruleMeta[uint32(d.RuleID)]; ok {
+            d.RuleUID = meta.UID
+            if d.RuleName == "" { d.RuleTitle = meta.Title } else { d.RuleTitle = d.RuleName }
+            if d.Severity == "" { d.RuleLevel = meta.Level } else { d.RuleLevel = d.Severity }
+            d.RuleDescription = meta.Desc
+        }
+        s.mu.RUnlock()
         out = append(out, d)
     }
     writeJSON(w, http.StatusOK, out)
@@ -132,7 +181,7 @@ func (s *AppServer) handleIngest(w http.ResponseWriter, r *http.Request) {
         ep := extractEndpoint(ev)
         if ep.EndpointID != "" { _ = s.upsertEndpoint(r.Context(), ep) }
         // Store raw event (optional)
-        _ = s.insertEvent(r.Context(), ep.EndpointID, ev)
+        eventID, _ := s.insertEvent(r.Context(), ep.EndpointID, ev)
         // Evaluate
         s.evalMu.Lock()
         res, err := eng.Evaluate(ev)
@@ -144,6 +193,13 @@ func (s *AppServer) handleIngest(w http.ResponseWriter, r *http.Request) {
             // Persist detections per matched rule
             for _, rid := range res.MatchedRules {
                 _ = s.insertDetection(r.Context(), ep.EndpointID, int32(rid), "", "medium", 0.7, ev)
+                // Also persist event_rules link if we have metadata UID
+                s.mu.RLock()
+                meta, ok := s.ruleMeta[uint32(rid)]
+                s.mu.RUnlock()
+                if ok && meta.UID != "" && eventID > 0 {
+                    _ = s.insertEventRule(r.Context(), eventID, meta.UID)
+                }
             }
         }
     }
@@ -164,6 +220,10 @@ func (s *AppServer) handleRules(w http.ResponseWriter, r *http.Request) {
         comp := compiler.New()
         rs, err := comp.CompileRuleset(req.Rules)
         if err != nil { writeErr(w, 400, err); return }
+        // update metadata map
+        s.SetRuleMetaFromRuleset(rs)
+        // upsert rules metadata into DB
+        if err := s.UpsertRules(r.Context(), rs); err != nil { writeErr(w, 500, err); return }
         newEngine, err := dag.FromRuleset(rs, dag.DefaultEngineConfig())
         if err != nil { writeErr(w, 500, err); return }
         s.swapEngine(newEngine)
@@ -178,37 +238,25 @@ func (s *AppServer) handleRules(w http.ResponseWriter, r *http.Request) {
 // ---- Persistence ----
 
 func (s *AppServer) InitSchema() error {
-    stmts := []string{
-        `CREATE TABLE IF NOT EXISTS endpoints (
-            endpoint_id   TEXT PRIMARY KEY,
-            host_name     TEXT,
-            ip            TEXT,
-            agent_version TEXT,
-            last_seen     TIMESTAMP NOT NULL
-        )`,
-        `CREATE TABLE IF NOT EXISTS events (
-            id          BIGSERIAL PRIMARY KEY,
-            received_at TIMESTAMP NOT NULL,
-            endpoint_id TEXT,
-            event       JSONB
-        )`,
-        `CREATE TABLE IF NOT EXISTS detections (
-            id          BIGSERIAL PRIMARY KEY,
-            occurred_at TIMESTAMP NOT NULL,
-            endpoint_id TEXT,
-            rule_id     INTEGER,
-            rule_name   TEXT,
-            severity    TEXT,
-            confidence  DOUBLE PRECISION,
-            context     JSONB
-        )`,
+    // Use MIGRATIONS_PATH if provided, otherwise try common defaults
+    candidates := []string{}
+    if mp := os.Getenv("MIGRATIONS_PATH"); mp != "" {
+        candidates = append(candidates, mp)
     }
-    ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-    defer cancel()
-    for _, ssql := range stmts {
-        if _, err := s.db.ExecContext(ctx, ssql); err != nil { return err }
+    candidates = append(candidates, "./migrations", "/srv/migrations")
+    var lastErr error
+    for _, p := range candidates {
+        if _, statErr := os.Stat(p); statErr != nil {
+            lastErr = statErr
+            continue
+        }
+        if err := s.RunMigrations(p); err != nil {
+            lastErr = err
+            continue
+        }
+        return nil
     }
-    return nil
+    return fmt.Errorf("init schema: no usable migrations path; last error: %v", lastErr)
 }
 
 type endpointRec struct {
@@ -225,16 +273,25 @@ func (s *AppServer) upsertEndpoint(ctx context.Context, e endpointRec) error {
     return err
 }
 
-func (s *AppServer) insertEvent(ctx context.Context, endpointID string, ev map[string]any) error {
+func (s *AppServer) insertEvent(ctx context.Context, endpointID string, ev map[string]any) (int64, error) {
     b, _ := json.Marshal(ev)
-    _, err := s.db.ExecContext(ctx, `INSERT INTO events(received_at, endpoint_id, event) VALUES ($1,$2,$3)`, time.Now().UTC(), endpointID, string(b))
-    return err
+    var id int64
+    err := s.db.QueryRowContext(ctx, `INSERT INTO events(received_at, endpoint_id, event) VALUES ($1,$2,$3) RETURNING id`, time.Now().UTC(), endpointID, string(b)).Scan(&id)
+    return id, err
 }
 
 func (s *AppServer) insertDetection(ctx context.Context, endpointID string, ruleID int32, ruleName, severity string, confidence float64, ev map[string]any) error {
     b, _ := json.Marshal(ev)
     _, err := s.db.ExecContext(ctx, `INSERT INTO detections(occurred_at, endpoint_id, rule_id, rule_name, severity, confidence, context) VALUES ($1,$2,$3,$4,$5,$6,$7)`,
         time.Now().UTC(), endpointID, ruleID, ruleName, severity, confidence, string(b))
+    return err
+}
+
+func (s *AppServer) insertEventRule(ctx context.Context, eventID int64, ruleUID string) error {
+    // Insert into event_rules by resolving rules.id via rule_uid
+    _, err := s.db.ExecContext(ctx, `INSERT INTO event_rules(event_id, rule_id)
+        SELECT $1, id FROM rules WHERE rule_uid=$2
+        ON CONFLICT(event_id, rule_id) DO NOTHING`, eventID, ruleUID)
     return err
 }
 
