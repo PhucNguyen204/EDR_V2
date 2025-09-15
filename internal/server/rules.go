@@ -10,8 +10,8 @@ import (
     "github.com/PhucNguyen204/EDR_V2/engine_sigma_by_golang/dag"
 )
 
-// LoadRulesFromDir walks a directory recursively, compiles all .yml/.yaml files
-// into a single ruleset, builds a new DAG engine, and swaps it.
+// LoadRulesF DromDir walks a directory recursively, compiles all .yml/.yaml files
+// into a single ruleset, builds a newAG engine, and swaps it.
 // Returns (loaded_count, skipped_count, error).
 func (s *AppServer) LoadRulesFromDir(_ context.Context, dir string) (int, int, error) {
     c := compiler.New()

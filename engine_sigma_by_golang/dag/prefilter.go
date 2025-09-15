@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"strings"
 
-	ac "github.com/petar-dambovaliev/aho-corasick" // go get github.com/petar-dambovaliev/aho-corasick
+	ac "github.com/petar-dambovaliev/aho-corasick" 
 
 	engine "github.com/PhucNguyen204/EDR_V2/engine_sigma_by_golang"
 )
@@ -422,7 +422,6 @@ func estimateSelectivity(patternCount int) float64 {
 }
 
 func estimateMemoryUsage(patternCount int) int {
-	// Ước lượng thô kiểu Rust
 	stateCount := patternCount * 2
 	transitionOverhead := stateCount * 256
 	stateOverhead := stateCount * 32

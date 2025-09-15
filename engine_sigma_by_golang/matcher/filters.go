@@ -5,7 +5,6 @@ import (
 	"sort"
 	"sync"
 
-	// TODO: đổi về import thực tế nơi chứa Primitive (ir.go)
 	engine "github.com/PhucNguyen204/EDR_V2/engine_sigma_by_golang"
 )
 

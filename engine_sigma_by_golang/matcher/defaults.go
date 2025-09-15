@@ -36,9 +36,22 @@ func createExactMatch() MatchFn {
 func createContainsMatch() MatchFn {
 	return func(fieldValue string, values []string, modifiers []string) (bool, error) {
 		caseSensitive := containsString(modifiers, "case_sensitive")
+		requireAll := containsString(modifiers, "all")
 		f := fieldValue
 		if !caseSensitive {
 			f = strings.ToLower(f)
+		}
+		if requireAll {
+			for _, v := range values {
+				sub := v
+				if !caseSensitive {
+					sub = strings.ToLower(sub)
+				}
+				if !strings.Contains(f, sub) {
+					return false, nil
+				}
+			}
+			return true, nil
 		}
 		for _, v := range values {
 			sub := v
