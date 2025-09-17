@@ -2,9 +2,8 @@ package matcher
 
 import (
 	"fmt"
-	"strings"
 	ir "github.com/PhucNguyen204/EDR_V2/engine_sigma_by_golang"
-
+	"strings"
 )
 
 // MatchFn, ModifierFn đã có trong matcher/types.go
@@ -94,6 +93,12 @@ func (c *CompiledPrimitive) MemoryUsage() int {
 // Matches đánh giá primitive trên context.
 // Lưu ý: tương tự bản Rust đưa ra, ở đây KHÔNG áp dụng modifierChain vào field value.
 func (c *CompiledPrimitive) Matches(ctx *EventContext) bool {
+	if len(c.fieldPath) == 1 && c.fieldPath[0] == ir.AnyFieldSentinel {
+		return ctx.AnyValueMatches(func(candidate string) bool {
+			ok, _ := c.matchFn(candidate, c.values, c.rawModifiers)
+			return ok
+		})
+	}
 	fp := c.FieldPathString()
 	val, ok, err := ctx.GetField(fp)
 	if err != nil || !ok {
@@ -145,5 +150,3 @@ func (c *CompiledPrimitive) String() string {
 	return fmt.Sprintf("CompiledPrimitive{field_path=%q, values=%v, raw_modifiers=%v, has_modifiers=%v, value_count=%d, is_literal_only=%v}",
 		c.FieldPathString(), c.values, c.rawModifiers, c.HasModifiers(), c.ValueCount(), c.IsLiteralOnly())
 }
-
-

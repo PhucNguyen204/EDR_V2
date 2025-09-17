@@ -7,6 +7,8 @@ import (
 type PrimitiveId = uint32
 type RuleId = uint32
 
+const AnyFieldSentinel = "__sigma_any_field__"
+
 type Primitive struct {
 	Field     string   `json:"field"`
 	MatchType string   `json:"match_type"`
@@ -57,40 +59,40 @@ func (p Primitive) Key() string {
 }
 
 type CompiledRule struct {
-    RuleId     RuleId                   `json:"rule_id"`
-    Selections map[string][]PrimitiveId `json:"selections"` // selection name -> primitive IDs
-    Condition  string                   `json:"condition"`  // raw condition string
-    // Disjunctions: selection name -> các nhóm OR; mỗi nhóm là AND các primitive trong một map con.
-    Disjunctions map[string][][]PrimitiveId `json:"disjunctions,omitempty"`
-    Title       string `json:"title,omitempty"`
-    Description string `json:"description,omitempty"`
-    Level       string `json:"level,omitempty"`
-    RuleUID     string `json:"rule_uid,omitempty"`
-}
-func (r CompiledRule) Clone() CompiledRule {
-    cp := CompiledRule{
-        RuleId:       r.RuleId,
-        Selections:   make(map[string][]PrimitiveId, len(r.Selections)),
-        Condition:    r.Condition,
-        Disjunctions: make(map[string][][]PrimitiveId, len(r.Disjunctions)),
-        Title:        r.Title,
-        Description:  r.Description,
-        Level:        r.Level,
-        RuleUID:      r.RuleUID,
-    }
-    for k, v := range r.Selections {
-        cp.Selections[k] = append([]PrimitiveId(nil), v...)
-    }
-    for k, groups := range r.Disjunctions {
-        outGroups := make([][]PrimitiveId, 0, len(groups))
-        for _, g := range groups {
-            outGroups = append(outGroups, append([]PrimitiveId(nil), g...))
-        }
-        cp.Disjunctions[k] = outGroups
-    }
-    return cp
+	RuleId     RuleId                   `json:"rule_id"`
+	Selections map[string][]PrimitiveId `json:"selections"` // selection name -> primitive IDs
+	Condition  string                   `json:"condition"`  // raw condition string
+	// Disjunctions: selection name -> các nhóm OR; mỗi nhóm là AND các primitive trong một map con.
+	Disjunctions map[string][][]PrimitiveId `json:"disjunctions,omitempty"`
+	Title        string                     `json:"title,omitempty"`
+	Description  string                     `json:"description,omitempty"`
+	Level        string                     `json:"level,omitempty"`
+	RuleUID      string                     `json:"rule_uid,omitempty"`
 }
 
+func (r CompiledRule) Clone() CompiledRule {
+	cp := CompiledRule{
+		RuleId:       r.RuleId,
+		Selections:   make(map[string][]PrimitiveId, len(r.Selections)),
+		Condition:    r.Condition,
+		Disjunctions: make(map[string][][]PrimitiveId, len(r.Disjunctions)),
+		Title:        r.Title,
+		Description:  r.Description,
+		Level:        r.Level,
+		RuleUID:      r.RuleUID,
+	}
+	for k, v := range r.Selections {
+		cp.Selections[k] = append([]PrimitiveId(nil), v...)
+	}
+	for k, groups := range r.Disjunctions {
+		outGroups := make([][]PrimitiveId, 0, len(groups))
+		for _, g := range groups {
+			outGroups = append(outGroups, append([]PrimitiveId(nil), g...))
+		}
+		cp.Disjunctions[k] = outGroups
+	}
+	return cp
+}
 
 type CompiledRuleset struct {
 	PrimitiveMap map[string]PrimitiveId `json:"primitive_map"` // key = Primitive.Key()

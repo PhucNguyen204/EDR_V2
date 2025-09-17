@@ -129,6 +129,45 @@ func valueToString(v any, fieldName string, nested bool) (string, bool, error) {
 	}
 }
 
+// AnyValueMatches walks the event recursively and applies the predicate to each scalar value.
+func (c *EventContext) AnyValueMatches(match func(string) bool) bool {
+	if c == nil {
+		return false
+	}
+	return anyValueMatchesRecursive(c.Event, match)
+}
+
+func anyValueMatchesRecursive(node any, match func(string) bool) bool {
+	switch t := node.(type) {
+	case map[string]any:
+		for _, v := range t {
+			if anyValueMatchesRecursive(v, match) {
+				return true
+			}
+		}
+	case []any:
+		for _, v := range t {
+			if anyValueMatchesRecursive(v, match) {
+				return true
+			}
+		}
+	case string:
+		return match(t)
+	case bool:
+		if t {
+			return match("true")
+		}
+		return match("false")
+	case float64, float32, int, int64, int32, int16, int8, uint, uint64, uint32, uint16, uint8, json.Number:
+		return match(fmt.Sprint(t))
+	case nil:
+		return false
+	default:
+		return false
+	}
+	return false
+}
+
 // ClearCache xoá cache.
 func (c *EventContext) ClearCache() {
 	c.fieldCache = make(map[string]*string)
