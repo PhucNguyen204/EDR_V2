@@ -1,0 +1,118 @@
+# =======================
+# Global
+# =======================
+data_dir = "/home/puckun/vector-data"
+
+[api]
+enabled = true
+address = "127.0.0.1:8686"
+
+# =======================
+# Source: systemd-journald
+# =======================
+[sources.ubuntu_journal]
+type = "journald"
+journal_directory = "/var/log/journal"
+current_boot_only  = true
+# since_now = true
+# include_units = ["sshd.service", "cron.service"]
+# exclude_units = ["unattended-upgrades.service"]
+# [sources.ubuntu_journal.include_matches]
+# _TRANSPORT = ["kernel"]
+# _SYSTEMD_UNIT = ["sshd.service"]
+
+# =======================
+# Transform: normalize for Sigma compatibility
+# =======================
+[transforms.normalize_journal]
+type   = "remap"
+inputs = ["ubuntu_journal"]
+source = '''
+  # Hostname
+  if exists(._HOSTNAME) {
+    .hostname = ._HOSTNAME
+  } else if exists(.host) {
+    .hostname = .host
+  }
+
+  # Message
+  if exists(.MESSAGE) {
+    .message = .MESSAGE
+  } else if exists(.msg) {
+    .message = .msg
+  } else {
+    .message = ""
+  }
+
+  # EventID-ish
+  if exists(.SYSLOG_IDENTIFIER) {
+    .EventID = .SYSLOG_IDENTIFIER
+  }
+
+  # Process info
+  if exists(._EXE) {
+    .Image = ._EXE
+  } else if exists(._COMM) {
+    pname, perr = to_string(._COMM)
+    if perr == null && pname != "" {
+      .Image = "/usr/bin/" + pname
+    }
+  }
+  if exists(._COMM) {
+    pname2, perr2 = to_string(._COMM)
+    if perr2 == null { .ProcessName = pname2 }
+  }
+  if exists(._CMDLINE) { .CommandLine = ._CMDLINE }
+
+  # User info
+  if exists(._UID) { .TargetUserId = ._UID }
+  if exists(.USER) { .TargetUserName = .USER }
+
+  # Systemd unit & transport
+  if exists(._SYSTEMD_UNIT) { .ServiceName = ._SYSTEMD_UNIT }
+  if exists(._TRANSPORT)    { .Protocol    = ._TRANSPORT }
+
+  # Priority -> parse an toàn rồi suy diễn Action (demo)
+  if exists(.PRIORITY) {
+    prio_num, perr3 = to_int(.PRIORITY)
+    if perr3 == null {
+      .priority = prio_num
+      if prio_num <= 3 {
+        .Action = "deny"
+      } else {
+        .Action = "allow"
+      }
+    } else {
+      .Action = "allow"
+    }
+  } else {
+    .Action = "allow"
+  }
+
+  # IDs
+  if exists(._MACHINE_ID) { .MachineId = ._MACHINE_ID }
+  if exists(._BOOT_ID)    { .BootId    = ._BOOT_ID }
+
+  # (Optional) Clean up
+  if exists(._HOSTNAME)  { del(._HOSTNAME) }
+  if exists(.MESSAGE)    { del(.MESSAGE) }
+  if exists(.PRIORITY)   { del(.PRIORITY) }
+  if exists(._COMM)      { del(._COMM) }
+  if exists(._CMDLINE)   { del(._CMDLINE) }
+  if exists(._UID)       { del(._UID) }
+  if exists(._TRANSPORT) { del(._TRANSPORT) }
+  if exists(._SYSTEMD_UNIT) { del(._SYSTEMD_UNIT) }
+  if exists(._MACHINE_ID)   { del(._MACHINE_ID) }
+  if exists(._BOOT_ID)      { del(._BOOT_ID) }
+  if exists(.__REALTIME_TIMESTAMP)       { del(.__REALTIME_TIMESTAMP) }
+  if exists(._SOURCE_REALTIME_TIMESTAMP) { del(._SOURCE_REALTIME_TIMESTAMP) }
+'''
+
+# =======================
+# Sink
+# =======================
+[sinks.console]
+type   = "console"
+inputs = ["normalize_journal"]
+target = "stdout"
+encoding.codec = "json"
