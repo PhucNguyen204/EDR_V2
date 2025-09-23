@@ -1,0 +1,16 @@
+{
+    "risk_score":  21,
+    "rule_id":  "demo-sshd-fatal-error-lucene",
+    "enabled":  true,
+    "severity":  "medium",
+    "description":  "Detects SSHD fatal buffer error in journald (Lucene)",
+    "interval":  "1m",
+    "type":  "query",
+    "name":  "Demo - SSHD Fatal Error (Lucene)",
+    "index":  [
+                  "logs-linux-journald-*"
+              ],
+    "query":  "message:\"fatal: buffer_get_string: bad string\" AND process.name:sshd",
+    "from":  "now-1m",
+    "language":  "lucene"
+}

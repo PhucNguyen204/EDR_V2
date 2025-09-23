@@ -1,0 +1,57 @@
+vars:
+  schedule_interval: 1
+  schedule_interval_unit: m
+  index_names:
+    - "logs-linux-journald-*"
+    - "logs-linux-auditd-*"
+    - "logs-linux-syslog-*"
+postprocessing:
+  - type: template
+    template: |+
+      {%- set tags = [] -%}
+      {% for n in rule.tags %}
+        {%- set tag_string = n.namespace ~ '-' ~ n.name -%}
+        {%- set tags=tags.append(tag_string) -%}
+      {% endfor %}
+
+      {%- set rule_data = {
+        "name": rule.title,
+        "id": rule.id | lower,
+        "author": [rule.author] if rule.author is string else rule.author or "",
+        "description": rule.description if rule.description else "empty description",
+        "references": rule.references,
+        "enabled": true,
+        "interval": pipeline.vars.schedule_interval|string ~ pipeline.vars.schedule_interval_unit,
+        "from": "now-" ~ pipeline.vars.schedule_interval|string ~ pipeline.vars.schedule_interval_unit,
+        "rule_id": rule.id | lower,
+        "false_positives": rule.falsepositives,
+        "immutable": false,
+        "output_index": "",
+        "meta": {
+          "from": "1m"
+        },
+        "risk_score": rule.custom_attributes.risk_score | default(21),
+        "severity": rule.level.name | string | lower if rule.level is not none else 'low',
+        "threat": rule.custom_attributes.threat | default([]),
+        "severity_mapping": [],
+        "to": "now",
+        "version": 1,
+        "max_signals": 1000,
+        "exceptions_list": [],
+        "setup": "",
+        "type": "eql",
+        "note": "",
+        "license": "DRL",
+        "language": "esql",
+        "query": query,
+        "tags": tags,
+        "index": pipeline.vars.index_names,
+        "actions": [],
+        "related_integrations": [],
+        "required_fields": [],
+        "risk_score_mapping": []
+      }
+      -%}
+      
+      {{ rule_data | tojson }}
+

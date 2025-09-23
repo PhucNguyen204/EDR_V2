@@ -1,0 +1,1 @@
+{"query":{"bool":{"filter":[{"match_phrase":{"kibana.alert.rule.rule_id":"demo-sshd-fatal-error-lucene"}}]}}}
