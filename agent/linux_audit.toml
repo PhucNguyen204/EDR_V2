@@ -1,0 +1,56 @@
+# =======================
+# Global
+# =======================
+data_dir = "/home/puckun/vector-data"
+
+[api]
+enabled = true
+address = "127.0.0.1:8686"
+
+
+# =======================
+# Sources
+# =======================
+[sources.audit_raw]
+type = "file"
+include = [ "./audit_test.log" ]
+read_from = "beginning"
+
+# =======================
+# Transforms
+# =======================
+[transforms.audit_parsed]
+type = "remap"
+inputs = ["audit_raw"]
+source = '''
+  match1 = parse_regex(.message, r'^(?P<auditd_prefix>.*)\bmsg=(?P<kernel>audit\(.*)\x1d(?P<auditd_suffix>.*)$') ?? {}
+  . |= parse_key_value(match1.auditd_prefix) ?? {}
+  . |= parse_key_value(match1.auditd_suffix) ?? {}
+  kernel_message = match1.kernel || ""
+  match2 = parse_regex(kernel_message, r'^audit\((?P<timestamp>[0-9.]+):(?P<seqno>\d+)\):\s*(?P<rest>.*)$') ?? {}
+  ._parsed_timestamp = parse_timestamp(match2.timestamp, "%s%.f") ?? null
+  .timestamp = ._parsed_timestamp || now()
+  .seqno = parse_int(match2.seqno, 10) ?? null
+  kernel_message = match2.rest || kernel_message
+  match3, err = parse_regex(kernel_message, r'^(?P<prefix>.*)\bmsg=\x27(?P<quoted>[^\x27]*)\x27(?P<suffix>.*)$')
+  if err == null {
+    . |= parse_key_value(match3.prefix) ?? {}
+    . |= parse_key_value(match3.quoted) ?? {}
+    . |= parse_key_value(match3.suffix) ?? {}
+  } else {
+    . |= parse_key_value(kernel_message) ?? {}
+  }
+'''
+
+# =======================
+# Sinks
+# =======================
+[sinks.audit_console]
+type   = "console"
+inputs = ["audit_parsed"]
+target = "stdout"       
+encoding.codec = "json"
+
+[api]
+enabled = true
+address = "127.0.0.1:8686"

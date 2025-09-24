@@ -1,0 +1,122 @@
+data_dir = "d:/EDR_V2/deploy/vector/data"
+
+[sources.win_sample]
+type = "file"
+include = ["d:/EDR_V2/deploy/vector/samples/windows-events.log"]
+read_from = "end"
+ignore_older = 86400
+
+[transforms.parse_json]
+type = "remap"
+inputs = ["win_sample"]
+source = '''
+  parsed, err = parse_json(.message)
+  if err == null {
+    . = parsed
+  } else {
+    abort
+  }
+'''
+
+[transforms.to_ecs]
+type = "remap"
+inputs = ["parse_json"]
+source = '''
+  event_code_value = ""
+  if exists(."EventID") && ."EventID" != null {
+    event_code_value = ."EventID"
+  } else if exists(.event_id) && .event_id != null {
+    event_code_value = .event_id
+  }
+  event_code, err = to_string(event_code_value)
+  if err != null {
+    event_code = ""
+  }
+
+  provider_value = "unknown"
+  if exists(."Provider") && ."Provider" != null {
+    provider_value = ."Provider"
+  } else if exists(.provider_name) && .provider_name != null {
+    provider_value = .provider_name
+  }
+  provider, err = to_string(provider_value)
+  if err != null {
+    provider = "unknown"
+  }
+
+  host_value = "unknown-host"
+  if exists(."Computer") && ."Computer" != null {
+    host_value = ."Computer"
+  } else if exists(.ComputerName) && .ComputerName != null {
+    host_value = .ComputerName
+  } else if exists(.host) && .host != null {
+    host_value = .host
+  }
+  host_name, err = to_string(host_value)
+  if err != null {
+    host_name = "unknown-host"
+  }
+
+  agent_value = "vector-sim"
+  if exists(.agent_id) && .agent_id != null {
+    agent_value = .agent_id
+  } else if exists(.AgentId) && .AgentId != null {
+    agent_value = .AgentId
+  }
+  agent_id, err = to_string(agent_value)
+  if err != null {
+    agent_id = "vector-sim"
+  }
+
+  message_value = ""
+  if exists(.Message) && .Message != null {
+    message_value = .Message
+  } else if exists(.message) && .message != null {
+    message_value = .message
+  }
+  message, err = to_string(message_value)
+  if err != null {
+    message = ""
+  }
+
+  if !exists(.event) || .event == null {
+    .event = {}
+  }
+  .event.code = event_code
+  .event.provider = provider
+  .event.kind = "event"
+
+  if !exists(.host) || .host == null {
+    .host = {}
+  }
+  .host.name = host_name
+
+  if !exists(.agent) || .agent == null {
+    .agent = {}
+  }
+  .agent.id = agent_id
+  .agent.type = "vector"
+
+  .message = message
+'''
+
+[sinks.es_out]
+type = "elasticsearch"
+inputs = ["to_ecs"]
+endpoints = ["http://localhost:9200"]
+auth.strategy = "basic"
+auth.user = "elastic"
+auth.password = "lEEc3BIwwRW=ed3wlsJB"
+request.concurrency = 2
+request.retry.max_duration_secs = 60
+buffer.type = "memory"
+buffer.max_events = 500
+
+[sinks.es_out.bulk]
+index = "logs-windows-vector"
+
+[sinks.console_out]
+type = "console"
+inputs = ["to_ecs"]
+target = "stdout"
+encoding.codec = "json"

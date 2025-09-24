@@ -1,30 +1,31 @@
 package server
 
 import (
-    "bytes"
-    "database/sql"
-    "encoding/json"
-    "net/http"
-    "net/http/httptest"
-    "testing"
-    "time"
+	"bytes"
+	"database/sql"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+	"time"
 
-    sqlmock "github.com/DATA-DOG/go-sqlmock"
+	sqlmock "github.com/DATA-DOG/go-sqlmock"
 
-    "github.com/PhucNguyen204/EDR_V2/engine_sigma_by_golang/compiler"
-    "github.com/PhucNguyen204/EDR_V2/engine_sigma_by_golang/dag"
+	"github.com/PhucNguyen204/EDR_V2/engine_sigma_by_golang/compiler"
+	"github.com/PhucNguyen204/EDR_V2/engine_sigma_by_golang/dag"
+	"github.com/PhucNguyen204/EDR_V2/internal/processtree"
 )
 
 // helper to create a tiny engine that matches cmd.exe + whoami
 func makeTestEngine(t *testing.T) *dag.DagEngine {
-    t.Helper()
-    fm := compiler.NewFieldMapping()
-    fm.AddMapping("ProcessImage", "Image")
-    fm.AddMapping("ProcessCommandLine", "CommandLine")
-    c := compiler.WithFieldMapping(fm)
-    // Map fields used in rule to runtime fields
-    // Our compiler already defaults to normalizing during compile via FieldMapping if configured in rules; here we keep names consistent
-    rule := `
+	t.Helper()
+	fm := compiler.NewFieldMapping()
+	fm.AddMapping("ProcessImage", "Image")
+	fm.AddMapping("ProcessCommandLine", "CommandLine")
+	c := compiler.WithFieldMapping(fm)
+	// Map fields used in rule to runtime fields
+	// Our compiler already defaults to normalizing during compile via FieldMapping if configured in rules; here we keep names consistent
+	rule := `
 title: Whoami Via CMD
 detection:
   selection_image:
@@ -33,174 +34,252 @@ detection:
     ProcessCommandLine|contains: 'whoami'
   condition: selection_image and selection_cmdline
 `
-    if _, err := c.CompileRule(rule); err != nil {
-        t.Fatalf("compile rule: %v", err)
-    }
-    rs := c.IntoRuleset()
-    // Build engine
-    eng, err := dag.FromRuleset(rs, dag.DefaultEngineConfig())
-    if err != nil { t.Fatalf("build engine: %v", err) }
-    return eng
+	if _, err := c.CompileRule(rule); err != nil {
+		t.Fatalf("compile rule: %v", err)
+	}
+	rs := c.IntoRuleset()
+	// Build engine
+	eng, err := dag.FromRuleset(rs, dag.DefaultEngineConfig())
+	if err != nil {
+		t.Fatalf("build engine: %v", err)
+	}
+	return eng
 }
 
 func makeServer(t *testing.T, db *sql.DB, eng *dag.DagEngine) (*AppServer, *http.ServeMux) {
-    t.Helper()
-    s := NewAppServer(db, eng)
-    mux := http.NewServeMux()
-    s.RegisterRoutes(mux)
-    return s, mux
+	t.Helper()
+	s := NewAppServer(db, eng)
+	mux := http.NewServeMux()
+	s.RegisterRoutes(mux)
+	return s, mux
 }
 
 func TestHealthz(t *testing.T) {
-    db, _, _ := sqlmock.New()
-    defer db.Close()
-    eng := makeTestEngine(t)
-    _, mux := makeServer(t, db, eng)
-    req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
-    rr := httptest.NewRecorder()
-    mux.ServeHTTP(rr, req)
-    if rr.Code != http.StatusOK { t.Fatalf("status=%d", rr.Code) }
+	db, _, _ := sqlmock.New()
+	defer db.Close()
+	eng := makeTestEngine(t)
+	_, mux := makeServer(t, db, eng)
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d", rr.Code)
+	}
 }
 
 func TestIngestNonMatching(t *testing.T) {
-    db, mock, _ := sqlmock.New()
-    defer db.Close()
-    eng := makeTestEngine(t)
-    _, mux := makeServer(t, db, eng)
-    // No need to init schema in test
+	db, mock, _ := sqlmock.New()
+	defer db.Close()
+	eng := makeTestEngine(t)
+	_, mux := makeServer(t, db, eng)
+	// No need to init schema in test
 
-    // Expect endpoint upsert and event insert (RETURNING id)
-    mock.ExpectExec("INSERT INTO endpoints").WillReturnResult(sqlmock.NewResult(0, 1))
-    mock.ExpectQuery("INSERT INTO events").WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(1001))
+	// Expect endpoint upsert and event insert (RETURNING id)
+	mock.ExpectExec("INSERT INTO endpoints").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery("INSERT INTO events").WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(1001))
 
-    // Non-matching event: different image / cmdline
-    ev := map[string]any{
-        "endpoint_id": "host-01",
-        "Image": "C\\\\Windows\\\\System32\\\\notepad.exe",
-        "CommandLine": "notepad.exe readme.txt",
-    }
-    body, _ := json.Marshal(ev)
-    req := httptest.NewRequest(http.MethodPost, "/api/v1/ingest", bytes.NewReader(body))
-    req.Header.Set("Content-Type", "application/json")
-    rr := httptest.NewRecorder()
-    mux.ServeHTTP(rr, req)
-    if rr.Code != http.StatusOK {
-        t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
-    }
-    if err := mock.ExpectationsWereMet(); err != nil { t.Fatalf("db expectations: %v", err) }
+	// Non-matching event: different image / cmdline
+	ev := map[string]any{
+		"endpoint_id": "host-01",
+		"Image":       "C\\\\Windows\\\\System32\\\\notepad.exe",
+		"CommandLine": "notepad.exe readme.txt",
+	}
+	body, _ := json.Marshal(ev)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/ingest", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("db expectations: %v", err)
+	}
 }
 
 func TestIngestMatching(t *testing.T) {
-    db, mock, _ := sqlmock.New()
-    defer db.Close()
-    eng := makeTestEngine(t)
-    s, mux := makeServer(t, db, eng)
-    _ = s // silence linter
+	db, mock, _ := sqlmock.New()
+	defer db.Close()
+	eng := makeTestEngine(t)
+	s, mux := makeServer(t, db, eng)
+	_ = s // silence linter
 
-    // Expect endpoint upsert, event insert, and detection insert
-    mock.ExpectExec("INSERT INTO endpoints").WillReturnResult(sqlmock.NewResult(0, 1))
-    mock.ExpectQuery("INSERT INTO events").WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(1002))
-    mock.ExpectExec("INSERT INTO detections").WillReturnResult(sqlmock.NewResult(0, 1))
+	// Expect endpoint upsert, event insert, and detection insert
+	mock.ExpectExec("INSERT INTO endpoints").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery("INSERT INTO events").WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(1002))
+	mock.ExpectExec("INSERT INTO detections").WillReturnResult(sqlmock.NewResult(0, 1))
 
-    // Matching event (note: compiler normalized Process* to runtime fields; runtime expects Image/CommandLine)
-    ev := map[string]any{
-        "endpoint_id": "host-01",
-        "Image": "C\\\\Windows\\\\System32\\\\cmd.exe",
-        "CommandLine": "cmd.exe /c whoami",
-    }
-    body, _ := json.Marshal(ev)
-    req := httptest.NewRequest(http.MethodPost, "/api/v1/ingest", bytes.NewReader(body))
-    req.Header.Set("Content-Type", "application/json")
-    rr := httptest.NewRecorder()
-    mux.ServeHTTP(rr, req)
-    if rr.Code != http.StatusOK {
-        t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
-    }
-    if err := mock.ExpectationsWereMet(); err != nil { t.Fatalf("db expectations: %v", err) }
+	// Matching event (note: compiler normalized Process* to runtime fields; runtime expects Image/CommandLine)
+	ev := map[string]any{
+		"endpoint_id": "host-01",
+		"Image":       "C\\\\Windows\\\\System32\\\\cmd.exe",
+		"CommandLine": "cmd.exe /c whoami",
+	}
+	body, _ := json.Marshal(ev)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/ingest", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("db expectations: %v", err)
+	}
 }
 
 func TestIngestBatchMixed(t *testing.T) {
-    db, mock, _ := sqlmock.New()
-    defer db.Close()
-    eng := makeTestEngine(t)
-    _, mux := makeServer(t, db, eng)
+	db, mock, _ := sqlmock.New()
+	defer db.Close()
+	eng := makeTestEngine(t)
+	_, mux := makeServer(t, db, eng)
 
-    // Expect two upserts and two event inserts; one detection
-    mock.ExpectExec("INSERT INTO endpoints").WillReturnResult(sqlmock.NewResult(0, 1))
-    mock.ExpectQuery("INSERT INTO events").WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(1003))
-    mock.ExpectExec("INSERT INTO endpoints").WillReturnResult(sqlmock.NewResult(0, 1))
-    mock.ExpectQuery("INSERT INTO events").WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(1004))
-    mock.ExpectExec("INSERT INTO detections").WillReturnResult(sqlmock.NewResult(0, 1))
+	// Expect two upserts and two event inserts; one detection
+	mock.ExpectExec("INSERT INTO endpoints").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery("INSERT INTO events").WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(1003))
+	mock.ExpectExec("INSERT INTO endpoints").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery("INSERT INTO events").WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(1004))
+	mock.ExpectExec("INSERT INTO detections").WillReturnResult(sqlmock.NewResult(0, 1))
 
-    payload := []map[string]any{
-        { // non-matching
-            "endpoint_id": "host-01",
-            "Image": "C\\\\Windows\\\\System32\\\\notepad.exe",
-            "CommandLine": "notepad.exe readme.txt",
-        },
-        { // matching
-            "endpoint_id": "host-01",
-            "Image": "C\\\\Windows\\\\System32\\\\cmd.exe",
-            "CommandLine": "cmd.exe /c whoami",
-        },
-    }
-    body, _ := json.Marshal(payload)
-    req := httptest.NewRequest(http.MethodPost, "/api/v1/ingest", bytes.NewReader(body))
-    req.Header.Set("Content-Type", "application/json")
-    rr := httptest.NewRecorder()
-    mux.ServeHTTP(rr, req)
-    if rr.Code != http.StatusOK {
-        t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
-    }
-    if err := mock.ExpectationsWereMet(); err != nil { t.Fatalf("db expectations: %v", err) }
+	payload := []map[string]any{
+		{ // non-matching
+			"endpoint_id": "host-01",
+			"Image":       "C\\\\Windows\\\\System32\\\\notepad.exe",
+			"CommandLine": "notepad.exe readme.txt",
+		},
+		{ // matching
+			"endpoint_id": "host-01",
+			"Image":       "C\\\\Windows\\\\System32\\\\cmd.exe",
+			"CommandLine": "cmd.exe /c whoami",
+		},
+	}
+	body, _ := json.Marshal(payload)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/ingest", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("db expectations: %v", err)
+	}
 }
 
 func TestListEndpoints(t *testing.T) {
-    db, mock, _ := sqlmock.New()
-    defer db.Close()
-    eng := makeTestEngine(t)
-    _, mux := makeServer(t, db, eng)
+	db, mock, _ := sqlmock.New()
+	defer db.Close()
+	eng := makeTestEngine(t)
+	_, mux := makeServer(t, db, eng)
 
-    rows := sqlmock.NewRows([]string{"endpoint_id","host_name","ip","agent_version","last_seen"}).
-        AddRow("host-01","host-01","10.0.0.1","0.32.0", time.Now())
-    mock.ExpectQuery("SELECT endpoint_id, host_name").WillReturnRows(rows)
+	rows := sqlmock.NewRows([]string{"endpoint_id", "host_name", "ip", "agent_version", "last_seen"}).
+		AddRow("host-01", "host-01", "10.0.0.1", "0.32.0", time.Now())
+	mock.ExpectQuery("SELECT endpoint_id, host_name").WillReturnRows(rows)
 
-    req := httptest.NewRequest(http.MethodGet, "/api/v1/endpoints", nil)
-    rr := httptest.NewRecorder()
-    mux.ServeHTTP(rr, req)
-    if rr.Code != http.StatusOK { t.Fatalf("status=%d", rr.Code) }
-    if err := mock.ExpectationsWereMet(); err != nil { t.Fatalf("db expectations: %v", err) }
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/endpoints", nil)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d", rr.Code)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("db expectations: %v", err)
+	}
 }
 
 func TestRulesReplace(t *testing.T) {
-    db, mock, _ := sqlmock.New()
-    defer db.Close()
-    eng := makeTestEngine(t)
-    _, mux := makeServer(t, db, eng)
+	db, mock, _ := sqlmock.New()
+	defer db.Close()
+	eng := makeTestEngine(t)
+	_, mux := makeServer(t, db, eng)
 
-    // New rules payload (simple equals on EventID)
-    body := []byte(`{"rules":["title: R\ndetection:\n  selection:\n    EventID: 4624\n  condition: selection\n"]}`)
-    // Expect upsert into rules once
-    mock.ExpectExec("INSERT INTO rules").WillReturnResult(sqlmock.NewResult(0, 1))
-    req := httptest.NewRequest(http.MethodPost, "/api/v1/rules", bytes.NewReader(body))
-    req.Header.Set("Content-Type", "application/json")
-    rr := httptest.NewRecorder()
-    mux.ServeHTTP(rr, req)
-    if rr.Code != http.StatusOK {
-        t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
-    }
-    if err := mock.ExpectationsWereMet(); err != nil { t.Fatalf("db expectations: %v", err) }
+	// New rules payload (simple equals on EventID)
+	body := []byte(`{"rules":["title: R\ndetection:\n  selection:\n    EventID: 4624\n  condition: selection\n"]}`)
+	// Expect upsert into rules once
+	mock.ExpectExec("INSERT INTO rules").WillReturnResult(sqlmock.NewResult(0, 1))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/rules", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("db expectations: %v", err)
+	}
 }
 
 func TestStats(t *testing.T) {
-    db, _, _ := sqlmock.New()
-    defer db.Close()
-    eng := makeTestEngine(t)
-    _, mux := makeServer(t, db, eng)
-    req := httptest.NewRequest(http.MethodGet, "/api/v1/stats", nil)
-    rr := httptest.NewRecorder()
-    mux.ServeHTTP(rr, req)
-    if rr.Code != http.StatusOK {
-        t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
-    }
+	db, _, _ := sqlmock.New()
+	defer db.Close()
+	eng := makeTestEngine(t)
+	_, mux := makeServer(t, db, eng)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/stats", nil)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+}
+func TestProcessTreeAPI(t *testing.T) {
+	db, _, _ := sqlmock.New()
+	defer db.Close()
+	eng := makeTestEngine(t)
+	s, mux := makeServer(t, db, eng)
+
+	ts := time.Now().UTC()
+	s.procTree.Upsert(processtree.Event{
+		EndpointID: "host-01",
+		EntityID:   "proc-root",
+		PID:        "100",
+		Name:       "parent.exe",
+		Timestamp:  ts,
+	})
+	s.procTree.Upsert(processtree.Event{
+		EndpointID:     "host-01",
+		EntityID:       "proc-child",
+		ParentEntityID: "proc-root",
+		PID:            "200",
+		PPID:           "100",
+		Name:           "child.exe",
+		Timestamp:      ts.Add(time.Second),
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/process_tree?endpoint_id=host-01", nil)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+
+	var resp struct {
+		EndpointID string                     `json:"endpoint_id"`
+		Trees      []processtree.TreeSnapshot `json:"trees"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.EndpointID != "host-01" {
+		t.Fatalf("endpoint mismatch: %s", resp.EndpointID)
+	}
+	if len(resp.Trees) != 1 {
+		t.Fatalf("expected 1 root, got %d", len(resp.Trees))
+	}
+	if len(resp.Trees[0].Children) != 1 {
+		t.Fatalf("expected 1 child, got %d", len(resp.Trees[0].Children))
+	}
+}
+
+func TestProcessTreeAPIMissingParam(t *testing.T) {
+	db, _, _ := sqlmock.New()
+	defer db.Close()
+	eng := makeTestEngine(t)
+	_, mux := makeServer(t, db, eng)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/process_tree", nil)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
 }

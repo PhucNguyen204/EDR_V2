@@ -1,0 +1,10 @@
+2025-09-23T18:23:00.758443Z  INFO vector::app: Log level is enabled. level="info"
+2025-09-23T18:23:00.760787Z  INFO vector::app: Loading configs. paths=["D:\\EDR_V2\\deploy\\vector\\windows_file_to_es.toml"]
+2025-09-23T18:23:00.871739Z  INFO vector::topology::running: Running healthchecks.
+2025-09-23T18:23:00.872066Z  INFO vector::topology::builder: Healthcheck passed.
+2025-09-23T18:23:00.874248Z  INFO source{component_kind="source" component_id=win_sample component_type=file}: vector::sources::file: Starting file server. include=["d:/EDR_V2/deploy/vector/samples/windows-events.log"] exclude=[]
+2025-09-23T18:23:00.874815Z  INFO vector: Vector has started. debug="false" version="0.50.0" arch="x86_64" revision="9053198 2025-09-23 14:18:50.944442940"
+2025-09-23T18:23:00.875813Z  INFO vector::app: API is disabled, enable by setting `api.enabled` to `true` and use commands like `vector top`.
+2025-09-23T18:23:00.877398Z  INFO source{component_kind="source" component_id=win_sample component_type=file}:file_server: file_source_common::checkpointer: Attempting to read legacy checkpoint files.
+2025-09-23T18:23:00.889334Z  INFO vector::topology::builder: Healthcheck passed.
+2025-09-23T18:23:00.904340Z  INFO source{component_kind="source" component_id=win_sample component_type=file}:file_server: vector::internal_events::file::source: Found new file to watch. file=d:/EDR_V2\deploy\vector\samples\windows-events.log

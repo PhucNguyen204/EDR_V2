@@ -1,0 +1,78 @@
+{
+    "EventID":  4688,
+    "Message":  "Suspicious privilege::debug invocation by mimikatz.exe",
+    "Provider":  "Microsoft-Windows-Security-Auditing",
+    "AdditionalInfo":  {
+                           "CommandLine":  "privilege::debug mimikatz.exe",
+                           "ProcessName":  "C:\\Windows\\System32\\cmd.exe",
+                           "SubjectUserName":  "Administrator"
+                       },
+    "Computer":  "endpoint-42",
+    "agent_id":  "vectordemo01",
+    "source_address":  "win-event-log"
+}
+{
+    "EventID":  4688,
+    "Message":  "Vector Windows suspicious privilege::debug invocation by mimikatz.exe",
+    "Provider":  "Microsoft-Windows-Security-Auditing",
+    "AdditionalInfo":  {
+                           "CommandLine":  "privilege::debug mimikatz.exe",
+                           "ProcessName":  "C:\\Windows\\System32\\cmd.exe",
+                           "SubjectUserName":  "Administrator"
+                       },
+    "Computer":  "endpoint-42",
+    "agent_id":  "vectordemo01",
+    "source_address":  "win-event-log"
+}
+{
+    "EventID":  4688,
+    "Message":  "Vector pipeline detected privilege::debug mimikatz.exe",
+    "Provider":  "Microsoft-Windows-Security-Auditing",
+    "AdditionalInfo":  {
+                           "CommandLine":  "privilege::debug mimikatz.exe",
+                           "ProcessName":  "C:\\Windows\\System32\\cmd.exe",
+                           "SubjectUserName":  "Administrator"
+                       },
+    "Computer":  "endpoint-42",
+    "agent_id":  "vectordemo01",
+    "source_address":  "win-event-log"
+}
+{
+    "EventID":  4688,
+    "Message":  "Vector pipeline event privilege::debug mimikatz.exe",
+    "Provider":  "Microsoft-Windows-Security-Auditing",
+    "AdditionalInfo":  {
+                           "CommandLine":  "privilege::debug mimikatz.exe",
+                           "ProcessName":  "C:\\Windows\\System32\\cmd.exe",
+                           "SubjectUserName":  "Administrator"
+                       },
+    "Computer":  "endpoint-42",
+    "agent_id":  "vectordemo01",
+    "source_address":  "win-event-log"
+}
+{
+    "EventID":  4688,
+    "Message":  "Vector-sent privilege::debug mimikatz.exe event",
+    "Provider":  "Microsoft-Windows-Security-Auditing",
+    "AdditionalInfo":  {
+                           "CommandLine":  "privilege::debug mimikatz.exe",
+                           "ProcessName":  "C:\\Windows\\System32\\cmd.exe",
+                           "SubjectUserName":  "Administrator"
+                       },
+    "Computer":  "endpoint-42",
+    "agent_id":  "vectordemo01",
+    "source_address":  "win-event-log"
+}
+{
+    "EventID":  4688,
+    "Message":  "Vector pipeline test privilege::debug mimikatz.exe",
+    "Provider":  "Microsoft-Windows-Security-Auditing",
+    "AdditionalInfo":  {
+                           "CommandLine":  "privilege::debug mimikatz.exe",
+                           "ProcessName":  "C:\\Windows\\System32\\cmd.exe",
+                           "SubjectUserName":  "Administrator"
+                       },
+    "Computer":  "endpoint-42",
+    "agent_id":  "vectordemo01",
+    "source_address":  "win-event-log"
+}
