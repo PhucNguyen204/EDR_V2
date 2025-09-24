@@ -2,8 +2,10 @@ package compiler
 
 import (
 	"fmt"
+	"io"
 	"strconv"
 	"strings"
+	"time"
 
 	ir "github.com/PhucNguyen204/EDR_V2/engine_sigma_by_golang"
 	yaml "gopkg.in/yaml.v3"
@@ -11,27 +13,29 @@ import (
 
 // Compiler compiles SIGMA YAML rules into IR CompiledRuleset with field mapping.
 type Compiler struct {
-	primitiveMap        map[string]ir.PrimitiveId
-	primitives          []ir.Primitive
-	nextPrimitiveId     ir.PrimitiveId
-	currentSelectionMap map[string][]ir.PrimitiveId
-	currentSelectionOr  map[string][][]ir.PrimitiveId
-	fieldMapping        FieldMapping
-	nextRuleId          ir.RuleId
-	compiledRules       []ir.CompiledRule
+	primitiveMap         map[string]ir.PrimitiveId
+	primitives           []ir.Primitive
+	nextPrimitiveId      ir.PrimitiveId
+	currentSelectionMap  map[string][]ir.PrimitiveId
+	currentSelectionOr   map[string][][]ir.PrimitiveId
+	fieldMapping         FieldMapping
+	nextRuleId           ir.RuleId
+	compiledRules        []ir.CompiledRule
+	compiledCorrelations []ir.CompiledCorrelationRule
 }
 
 // New returns a new Compiler with default field mapping.
 func New() *Compiler {
 	return &Compiler{
-		primitiveMap:        make(map[string]ir.PrimitiveId),
-		primitives:          make([]ir.Primitive, 0),
-		nextPrimitiveId:     0,
-		currentSelectionMap: make(map[string][]ir.PrimitiveId),
-		currentSelectionOr:  make(map[string][][]ir.PrimitiveId),
-		fieldMapping:        NewFieldMapping(),
-		nextRuleId:          0,
-		compiledRules:       make([]ir.CompiledRule, 0),
+		primitiveMap:         make(map[string]ir.PrimitiveId),
+		primitives:           make([]ir.Primitive, 0),
+		nextPrimitiveId:      0,
+		currentSelectionMap:  make(map[string][]ir.PrimitiveId),
+		currentSelectionOr:   make(map[string][][]ir.PrimitiveId),
+		fieldMapping:         NewFieldMapping(),
+		nextRuleId:           0,
+		compiledRules:        make([]ir.CompiledRule, 0),
+		compiledCorrelations: make([]ir.CompiledCorrelationRule, 0),
 	}
 }
 
@@ -48,111 +52,182 @@ func (c *Compiler) Primitives() []ir.Primitive { return append([]ir.Primitive(ni
 
 // CompileRule compiles a single YAML rule and appends to internal state.
 func (c *Compiler) CompileRule(ruleYAML string) (ir.RuleId, error) {
-	c.currentSelectionMap = make(map[string][]ir.PrimitiveId)
-	c.currentSelectionOr = make(map[string][][]ir.PrimitiveId)
-
-	var doc map[string]any
-	if err := yaml.Unmarshal([]byte(ruleYAML), &doc); err != nil {
-		return 0, fmt.Errorf("YAMLError: %v", err)
-	}
-
-	// rule id
-	rid := c.extractRuleId(doc)
-
-	// detection section
-	detRaw, ok := doc["detection"]
-	if !ok {
-		return 0, fmt.Errorf("CompilationError: Missing detection section")
-	}
-
-	det, ok := detRaw.(map[string]any)
-	if !ok {
-		return 0, fmt.Errorf("CompilationError: detection must be a mapping")
-	}
-
-	// process all selections except condition
-	for key, val := range det {
-		if key == "condition" {
+	dec := yaml.NewDecoder(strings.NewReader(ruleYAML))
+	var lastRid ir.RuleId
+	anyDoc := false
+	for {
+		var doc map[string]any
+		if err := dec.Decode(&doc); err != nil {
+			if err == io.EOF {
+				break
+			}
+			return 0, fmt.Errorf("YAMLError: %v", err)
+		}
+		if doc == nil || len(doc) == 0 {
 			continue
 		}
-		switch tv := val.(type) {
-		case map[string]any:
-			if err := c.processSelectionFromYAML(key, tv); err != nil {
-				return 0, err
+		anyDoc = true
+		// Detection rule document
+		if detRaw, ok := doc["detection"]; ok {
+			c.currentSelectionMap = make(map[string][]ir.PrimitiveId)
+			c.currentSelectionOr = make(map[string][][]ir.PrimitiveId)
+
+			rid := c.extractRuleId(doc)
+			det, ok := detRaw.(map[string]any)
+			if !ok {
+				return 0, fmt.Errorf("CompilationError: detection must be a mapping")
 			}
-		case []any:
-			if err := c.processSelectionListOfMaps(key, tv); err != nil {
-				return 0, err
+			// process all selections except condition
+			for key, val := range det {
+				if key == "condition" {
+					continue
+				}
+				switch tv := val.(type) {
+				case map[string]any:
+					if err := c.processSelectionFromYAML(key, tv); err != nil {
+						return 0, err
+					}
+				case []any:
+					if err := c.processSelectionListOfMaps(key, tv); err != nil {
+						return 0, err
+					}
+				default:
+				}
 			}
-		default:
-			// ignore gracefully
+			// condition
+			cond := ""
+			if v, ok := det["condition"].(string); ok {
+				cond = v
+			} else {
+				return 0, fmt.Errorf("CompilationError: Missing or invalid detection.condition")
+			}
+
+			if lsRaw, ok := doc["logsource"].(map[string]any); ok {
+				trimmed := strings.TrimSpace(cond)
+				lowered := strings.ToLower(trimmed)
+				if strings.HasPrefix(lowered, "not ") || lowered == "not" || strings.HasPrefix(lowered, "not(") {
+					gateName := "__logsource_gate"
+					gateIDs := make([]ir.PrimitiveId, 0, 3)
+					if v, ok := lsRaw["product"].(string); ok && v != "" {
+						pid := c.getOrCreatePrimitive(ir.NewPrimitive("event.product", "equals", []string{v}, nil))
+						gateIDs = append(gateIDs, pid)
+					}
+					if v, ok := lsRaw["category"].(string); ok && v != "" {
+						pid := c.getOrCreatePrimitive(ir.NewPrimitive("event.category", "equals", []string{v}, nil))
+						gateIDs = append(gateIDs, pid)
+					}
+					if v, ok := lsRaw["service"].(string); ok && v != "" {
+						pid := c.getOrCreatePrimitive(ir.NewPrimitive("event.service", "equals", []string{v}, nil))
+						gateIDs = append(gateIDs, pid)
+					}
+					if len(gateIDs) > 0 {
+						c.currentSelectionMap[gateName] = gateIDs
+						cond = gateName + " and (" + cond + ")"
+					}
+				}
+			}
+
+			cr := ir.CompiledRule{
+				RuleId:       rid,
+				Selections:   copySelMap(c.currentSelectionMap),
+				Disjunctions: copyOrMap(c.currentSelectionOr),
+				Condition:    cond,
+			}
+			if v, ok := doc["name"].(string); ok {
+				cr.RuleName = v
+			}
+			if v, ok := doc["title"].(string); ok {
+				cr.Title = v
+			}
+			if v, ok := doc["description"].(string); ok {
+				cr.Description = v
+			}
+			if v, ok := doc["level"].(string); ok {
+				cr.Level = v
+			}
+			if v, ok := doc["id"]; ok {
+				cr.RuleUID = fmt.Sprint(v)
+			}
+			c.compiledRules = append(c.compiledRules, cr)
+			lastRid = rid
+			continue
 		}
-	}
 
-	// extract condition string
-	cond := ""
-	if v, ok := det["condition"]; ok {
-		if s, ok := v.(string); ok {
-			cond = s
-		} else {
-			return 0, fmt.Errorf("CompilationError: Condition must be a string")
+		// Correlation rule document
+		if corrRaw, ok := doc["correlation"]; ok {
+			cm, ok := corrRaw.(map[string]any)
+			if !ok {
+				return 0, fmt.Errorf("CompilationError: correlation must be a mapping")
+			}
+			var corr ir.CompiledCorrelationRule
+			if v, ok := doc["name"].(string); ok {
+				corr.Name = v
+			}
+			if v, ok := doc["title"].(string); ok {
+				corr.Title = v
+			}
+			if v, ok := doc["description"].(string); ok {
+				corr.Description = v
+			}
+			if v, ok := doc["level"].(string); ok {
+				corr.Level = v
+			}
+			if v, ok := doc["id"]; ok {
+				corr.RuleUID = fmt.Sprint(v)
+			}
+			if v, ok := cm["type"].(string); ok {
+				corr.Type = v
+			} else {
+				return 0, fmt.Errorf("CompilationError: correlation.type is required")
+			}
+			if arr, ok := cm["rules"].([]any); ok {
+				for _, it := range arr {
+					if s, ok := it.(string); ok && s != "" {
+						corr.Rules = append(corr.Rules, s)
+					}
+				}
+			}
+			if arr, ok := cm["group-by"].([]any); ok {
+				for _, it := range arr {
+					if s, ok := it.(string); ok && s != "" {
+						corr.GroupBy = append(corr.GroupBy, s)
+					}
+				}
+			} else if arr, ok := cm["group_by"].([]any); ok {
+				for _, it := range arr {
+					if s, ok := it.(string); ok && s != "" {
+						corr.GroupBy = append(corr.GroupBy, s)
+					}
+				}
+			}
+			if v, ok := cm["timespan"].(string); ok && v != "" {
+				d, err := parseDurationLoose(v)
+				if err != nil {
+					return 0, fmt.Errorf("CompilationError: invalid correlation.timespan: %v", err)
+				}
+				corr.Timespan = d
+			}
+			if condRaw, ok := cm["condition"].(map[string]any); ok {
+				if strings.EqualFold(corr.Type, "value_count") {
+					var vc ir.ValueCountCondition
+					if v, ok := condRaw["field"].(string); ok {
+						vc.Field = v
+					}
+					if v, ok := condRaw["gte"]; ok {
+						vc.Gte = toInt(v)
+					}
+					corr.ValueCount = &vc
+				}
+			}
+			c.compiledCorrelations = append(c.compiledCorrelations, corr)
+			continue
 		}
-	} else {
-		return 0, fmt.Errorf("CompilationError: Missing detection.condition")
+		// Unknown doc: ignore
 	}
-
-	// Optional: gating by logsource for negative-only (starts with 'not') rules
-	// If condition begins with 'not', AND a gate selection based on logsource.product/category/service
-	if lsRaw, ok := doc["logsource"].(map[string]any); ok {
-		trimmed := strings.TrimSpace(cond)
-		lowered := strings.ToLower(trimmed)
-		if strings.HasPrefix(lowered, "not ") || lowered == "not" || strings.HasPrefix(lowered, "not(") {
-			gateName := "__logsource_gate"
-			gateIDs := make([]ir.PrimitiveId, 0, 3)
-			// Build equals primitives on event.product/category/service
-			if v, ok := lsRaw["product"].(string); ok && v != "" {
-				pid := c.getOrCreatePrimitive(ir.NewPrimitive("event.product", "equals", []string{v}, nil))
-				gateIDs = append(gateIDs, pid)
-			}
-			if v, ok := lsRaw["category"].(string); ok && v != "" {
-				pid := c.getOrCreatePrimitive(ir.NewPrimitive("event.category", "equals", []string{v}, nil))
-				gateIDs = append(gateIDs, pid)
-			}
-			if v, ok := lsRaw["service"].(string); ok && v != "" {
-				pid := c.getOrCreatePrimitive(ir.NewPrimitive("event.service", "equals", []string{v}, nil))
-				gateIDs = append(gateIDs, pid)
-			}
-			if len(gateIDs) > 0 {
-				c.currentSelectionMap[gateName] = gateIDs
-				cond = gateName + " and (" + cond + ")"
-			}
-		}
+	if !anyDoc {
+		return 0, fmt.Errorf("CompilationError: empty YAML")
 	}
-
-	// record compiled rule
-	cr := ir.CompiledRule{
-		RuleId:       rid,
-		Selections:   copySelMap(c.currentSelectionMap),
-		Disjunctions: copyOrMap(c.currentSelectionOr),
-		Condition:    cond,
-	}
-	// extract optional metadata: title, description, level, id (string)
-	if v, ok := doc["title"].(string); ok {
-		cr.Title = v
-	}
-	if v, ok := doc["description"].(string); ok {
-		cr.Description = v
-	}
-	if v, ok := doc["level"].(string); ok {
-		cr.Level = v
-	}
-	// preserve original id as string when present
-	if v, ok := doc["id"]; ok {
-		cr.RuleUID = fmt.Sprint(v)
-	}
-	c.compiledRules = append(c.compiledRules, cr)
-
-	return rid, nil
+	return lastRid, nil
 }
 
 // CompileRuleset compiles multiple rules; returns a CompiledRuleset.
@@ -177,6 +252,13 @@ func (c *Compiler) IntoRuleset() *ir.CompiledRuleset {
 	// add rules; AddRule will assign RuleId by index; but we keep same RuleId numbers
 	rs.Rules = make([]ir.CompiledRule, len(c.compiledRules))
 	copy(rs.Rules, c.compiledRules)
+	if len(c.compiledCorrelations) > 0 {
+		rs.Correlations = make([]ir.CompiledCorrelationRule, len(c.compiledCorrelations))
+		copy(rs.Correlations, c.compiledCorrelations)
+		for i := range rs.Correlations {
+			rs.Correlations[i].CorrelationId = uint32(i)
+		}
+	}
 	return rs
 }
 
@@ -386,4 +468,46 @@ func copyOrMap(m map[string][][]ir.PrimitiveId) map[string][][]ir.PrimitiveId {
 		out[k] = cpGroups
 	}
 	return out
+}
+
+// parseDurationLoose parses durations like "30m", "1h", or minutes as int (e.g., "30").
+func parseDurationLoose(s string) (time.Duration, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, nil
+	}
+	if d, err := time.ParseDuration(s); err == nil {
+		return d, nil
+	}
+	// try to treat as minutes
+	if n, err := strconv.Atoi(s); err == nil {
+		return time.Duration(n) * time.Minute, nil
+	}
+	return 0, fmt.Errorf("invalid duration: %q", s)
+}
+
+func toInt(v any) int {
+	switch t := v.(type) {
+	case int:
+		return t
+	case int32:
+		return int(t)
+	case int64:
+		return int(t)
+	case uint:
+		return int(t)
+	case uint32:
+		return int(t)
+	case uint64:
+		return int(t)
+	case float32:
+		return int(t)
+	case float64:
+		return int(t)
+	case string:
+		if n, err := strconv.Atoi(t); err == nil {
+			return n
+		}
+	}
+	return 0
 }

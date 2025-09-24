@@ -1,0 +1,54 @@
+data_dir = 
+[api]
+enabled = true
+address = "127.0.0.1:8686"
+
+[sources.ubuntu_journal]
+journal_directory = "/var/log/journal"
+current_boot_only  = true
+include_units = ["ssh.service"]
+
+[transforms.normalize_journal]
+type   = "remap"
+inputs = ["ubuntu_journal"]
+source = '''
+  # Endpoint identity (used by EDR server)
+  if exists(._MACHINE_ID) { .endpoint_id = ._MACHINE_ID }
+
+  # Hostname
+  if exists(._HOSTNAME) { .hostname = ._HOSTNAME }
+
+  # Message
+  if exists(.MESSAGE) { .message = .MESSAGE } else { .message = "" }
+
+  # Process info
+  if exists(._EXE)    { .Image = ._EXE }
+  if exists(._COMM)   { .ProcessName = to_string!(._COMM) }
+  if exists(._CMDLINE) { .CommandLine = ._CMDLINE }
+
+  # systemd metadata
+  if exists(._SYSTEMD_UNIT) { .ServiceName = ._SYSTEMD_UNIT }
+  if exists(.SYSLOG_IDENTIFIER) { .EventID = .SYSLOG_IDENTIFIER }
+
+  # Enrich for Sigma mapping
+  .event = {"product":"linux","service":"sshd"}
+
+  # Clean heavy journald-only fields (optional)
+  del(._HOSTNAME)
+  del(._EXE)
+  del(._COMM)
+  del(._CMDLINE)
+  del(._SYSTEMD_UNIT)
+  del(.MESSAGE)
+  del(._MACHINE_ID)
+'''
+
+[sinks.edr_http]
+type   = "http"
+inputs = ["normalize_journal"]
+uri    = "http://EDR_SERVER:8080/api/v1/ingest"
+method = "post"
+encoding.codec = "json"
+batch.max_events = 1
+request.in_flight_limit = 8
+

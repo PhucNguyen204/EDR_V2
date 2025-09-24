@@ -20,16 +20,18 @@ import (
 )
 
 type AppServer struct {
-	db       *sql.DB
-	engine   *dag.DagEngine
-	mu       sync.RWMutex        // protects engine swap
-	evalMu   sync.Mutex          // serialize evaluator usage (not goroutine-safe)
-	ruleMeta map[uint32]RuleMeta // metadata by numeric RuleId
-	procTree *processtree.Manager
+    db       *sql.DB
+    engine   *dag.DagEngine
+    mu       sync.RWMutex        // protects engine swap
+    evalMu   sync.Mutex          // serialize evaluator usage (not goroutine-safe)
+    ruleMeta map[uint32]RuleMeta // metadata by numeric RuleId
+    procTree *processtree.Manager
+    corrMgr  *CorrelationManager
+    ruleName map[uint32]string // rule id -> rule name
 }
 
 func NewAppServer(db *sql.DB, engine *dag.DagEngine) *AppServer {
-	return &AppServer{db: db, engine: engine, ruleMeta: make(map[uint32]RuleMeta), procTree: processtree.NewManager()}
+    return &AppServer{db: db, engine: engine, ruleMeta: make(map[uint32]RuleMeta), procTree: processtree.NewManager(), ruleName: make(map[uint32]string)}
 }
 
 type RuleMeta struct {
@@ -64,18 +66,28 @@ func (s *AppServer) swapEngine(e *dag.DagEngine) {
 
 // SetRuleMetaFromRuleset populates in-memory metadata map from compiled ruleset
 func (s *AppServer) SetRuleMetaFromRuleset(rs *ir.CompiledRuleset) {
-	m := make(map[uint32]RuleMeta, len(rs.Rules))
-	for _, r := range rs.Rules {
-		m[uint32(r.RuleId)] = RuleMeta{
-			UID:   r.RuleUID,
-			Title: r.Title,
-			Level: r.Level,
-			Desc:  r.Description,
-		}
-	}
-	s.mu.Lock()
-	s.ruleMeta = m
-	s.mu.Unlock()
+    m := make(map[uint32]RuleMeta, len(rs.Rules))
+    rn := make(map[uint32]string, len(rs.Rules))
+    for _, r := range rs.Rules {
+        m[uint32(r.RuleId)] = RuleMeta{
+            UID:   r.RuleUID,
+            Title: r.Title,
+            Level: r.Level,
+            Desc:  r.Description,
+        }
+        if r.RuleName != "" { rn[uint32(r.RuleId)] = r.RuleName } else if r.Title != "" { rn[uint32(r.RuleId)] = r.Title } else { rn[uint32(r.RuleId)] = fmt.Sprintf("rule-%d", r.RuleId) }
+    }
+    s.mu.Lock()
+    s.ruleMeta = m
+    s.ruleName = rn
+    s.mu.Unlock()
+}
+
+// Set correlations into manager
+func (s *AppServer) SetCorrelationsFromRuleset(rs *ir.CompiledRuleset) {
+    s.mu.Lock()
+    defer s.mu.Unlock()
+    s.corrMgr = NewCorrelationManagerFromIR(rs.Correlations)
 }
 
 // ---- Handlers ----
@@ -219,7 +231,7 @@ func (s *AppServer) handleIngest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	eng := s.currentEngine()
-	for _, ev := range events {
+    for _, ev := range events {
 		// Track endpoint
 		ep := extractEndpoint(ev)
 		if ep.EndpointID != "" {
@@ -233,29 +245,49 @@ func (s *AppServer) handleIngest(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		// Evaluate
-		s.evalMu.Lock()
-		res, err := eng.Evaluate(ev)
-		s.evalMu.Unlock()
-		if err != nil {
-			log.Printf("evaluate error: %v", err)
-			continue
-		}
-		if len(res.MatchedRules) > 0 {
+        s.evalMu.Lock()
+        res, err := eng.Evaluate(ev)
+        s.evalMu.Unlock()
+        if err != nil {
+            log.Printf("evaluate error: %v", err)
+            continue
+        }
+        if len(res.MatchedRules) > 0 {
 			// Console log anomaly
 			log.Printf("ALERT endpoint=%s rules=%v nodes=%d prims=%d", ep.EndpointID, res.MatchedRules, res.NodesEvaluated, res.PrimitiveEvaluations)
 			// Persist detections per matched rule
-			for _, rid := range res.MatchedRules {
-				_ = s.insertDetection(r.Context(), ep.EndpointID, int32(rid), "", "medium", 0.7, ev)
-				// Also persist event_rules link if we have metadata UID
-				s.mu.RLock()
-				meta, ok := s.ruleMeta[uint32(rid)]
-				s.mu.RUnlock()
-				if ok && meta.UID != "" && eventID > 0 {
-					_ = s.insertEventRule(r.Context(), eventID, meta.UID)
-				}
-			}
-		}
-	}
+            for _, rid := range res.MatchedRules {
+                _ = s.insertDetection(r.Context(), ep.EndpointID, int32(rid), "", "medium", 0.7, ev)
+                // Also persist event_rules link if we have metadata UID
+                s.mu.RLock()
+                meta, ok := s.ruleMeta[uint32(rid)]
+                s.mu.RUnlock()
+                if ok && meta.UID != "" && eventID > 0 {
+                    _ = s.insertEventRule(r.Context(), eventID, meta.UID)
+                }
+            }
+            // feed correlation manager
+            s.mu.RLock()
+            names := make([]string, 0, len(res.MatchedRules))
+            for _, rid := range res.MatchedRules { if n, ok := s.ruleName[uint32(rid)]; ok { names = append(names, n) } }
+            cm := s.corrMgr
+            s.mu.RUnlock()
+            if cm != nil {
+                hits := cm.Observe(ev, names, time.Now().UTC())
+                for _, h := range hits {
+                    // store detection for correlation hit with ruleName = title
+                    ctx := map[string]any{
+                        "correlation_id": h.correlationID,
+                        "group":         h.groupKey,
+                        "count":         h.count,
+                        "source_rule_names": names,
+                        "event":         ev,
+                    }
+                    _ = s.insertDetection(r.Context(), ep.EndpointID, 0, h.title, h.level, 0.9, ctx)
+                }
+            }
+        }
+    }
 	writeJSON(w, http.StatusOK, map[string]any{"ingested": len(events)})
 }
 
@@ -366,7 +398,6 @@ func (s *AppServer) insertEventRule(ctx context.Context, eventID int64, ruleUID 
 
 func extractEndpoint(ev map[string]any) endpointRec {
 	e := endpointRec{LastSeen: time.Now().UTC()}
-	// Try different common fields as sent by agents
 	if v, ok := ev["endpoint_id"]; ok {
 		e.EndpointID = toString(v)
 	}

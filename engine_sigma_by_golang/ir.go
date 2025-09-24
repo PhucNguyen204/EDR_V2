@@ -2,6 +2,7 @@ package engine_sigma_by_golang
 
 import (
 	"encoding/json"
+	"time"
 )
 
 type PrimitiveId = uint32
@@ -64,6 +65,7 @@ type CompiledRule struct {
 	Condition  string                   `json:"condition"`  // raw condition string
 	// Disjunctions: selection name -> các nhóm OR; mỗi nhóm là AND các primitive trong một map con.
 	Disjunctions map[string][][]PrimitiveId `json:"disjunctions,omitempty"`
+	RuleName     string                     `json:"rule_name,omitempty"`
 	Title        string                     `json:"title,omitempty"`
 	Description  string                     `json:"description,omitempty"`
 	Level        string                     `json:"level,omitempty"`
@@ -76,6 +78,7 @@ func (r CompiledRule) Clone() CompiledRule {
 		Selections:   make(map[string][]PrimitiveId, len(r.Selections)),
 		Condition:    r.Condition,
 		Disjunctions: make(map[string][][]PrimitiveId, len(r.Disjunctions)),
+		RuleName:     r.RuleName,
 		Title:        r.Title,
 		Description:  r.Description,
 		Level:        r.Level,
@@ -94,10 +97,52 @@ func (r CompiledRule) Clone() CompiledRule {
 	return cp
 }
 
+type ValueCountCondition struct {
+	Field string `json:"field"`
+	Gte   int    `json:"gte"`
+}
+
+type CompiledCorrelationRule struct {
+	CorrelationId uint32               `json:"correlation_id"`
+	Name          string               `json:"name,omitempty"`
+	Title         string               `json:"title,omitempty"`
+	Description   string               `json:"description,omitempty"`
+	Level         string               `json:"level,omitempty"`
+	RuleUID       string               `json:"rule_uid,omitempty"`
+	Type          string               `json:"type"`
+	Rules         []string             `json:"rules"`
+	GroupBy       []string             `json:"group_by,omitempty"`
+	Timespan      time.Duration        `json:"timespan"`
+	ValueCount    *ValueCountCondition `json:"value_count,omitempty"`
+}
+
+func (c CompiledCorrelationRule) Clone() CompiledCorrelationRule {
+	return CompiledCorrelationRule{
+		CorrelationId: c.CorrelationId,
+		Name:          c.Name,
+		Title:         c.Title,
+		Description:   c.Description,
+		Level:         c.Level,
+		RuleUID:       c.RuleUID,
+		Type:          c.Type,
+		Rules:         append([]string(nil), c.Rules...),
+		GroupBy:       append([]string(nil), c.GroupBy...),
+		Timespan:      c.Timespan,
+		ValueCount: func() *ValueCountCondition {
+			if c.ValueCount == nil {
+				return nil
+			}
+			vc := *c.ValueCount
+			return &vc
+		}(),
+	}
+}
+
 type CompiledRuleset struct {
-	PrimitiveMap map[string]PrimitiveId `json:"primitive_map"` // key = Primitive.Key()
-	Primitives   []Primitive            `json:"primitives"`
-	Rules        []CompiledRule         `json:"rules"`
+	PrimitiveMap map[string]PrimitiveId    `json:"primitive_map"` // key = Primitive.Key()
+	Primitives   []Primitive               `json:"primitives"`
+	Rules        []CompiledRule            `json:"rules"`
+	Correlations []CompiledCorrelationRule `json:"correlations,omitempty"`
 }
 
 func NewCompiledRuleset() *CompiledRuleset {
@@ -105,6 +150,7 @@ func NewCompiledRuleset() *CompiledRuleset {
 		PrimitiveMap: make(map[string]PrimitiveId),
 		Primitives:   make([]Primitive, 0),
 		Rules:        make([]CompiledRule, 0),
+		Correlations: make([]CompiledCorrelationRule, 0),
 	}
 }
 
@@ -151,6 +197,7 @@ func (c *CompiledRuleset) Clone() *CompiledRuleset {
 		PrimitiveMap: make(map[string]PrimitiveId, len(c.PrimitiveMap)),
 		Primitives:   make([]Primitive, len(c.Primitives)),
 		Rules:        make([]CompiledRule, len(c.Rules)),
+		Correlations: make([]CompiledCorrelationRule, len(c.Correlations)),
 	}
 	for k, v := range c.PrimitiveMap {
 		cp.PrimitiveMap[k] = v
@@ -161,5 +208,16 @@ func (c *CompiledRuleset) Clone() *CompiledRuleset {
 	for i, r := range c.Rules {
 		cp.Rules[i] = r.Clone()
 	}
+	for i, corr := range c.Correlations {
+		cp.Correlations[i] = corr.Clone()
+	}
 	return cp
+}
+
+func (c *CompiledRuleset) AddCorrelationRule(r CompiledCorrelationRule) uint32 {
+	id := uint32(len(c.Correlations))
+	cr := r.Clone()
+	cr.CorrelationId = id
+	c.Correlations = append(c.Correlations, cr)
+	return id
 }

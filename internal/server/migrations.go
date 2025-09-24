@@ -11,8 +11,7 @@ import (
     "time"
 )
 
-// RunMigrations executes all SQL files in the given directory in lexicographic order.
-// Each file may contain multiple statements separated by ';'. Simple and robust for CI/demo.
+
 func (s *AppServer) RunMigrations(dir string) error {
     entries := make([]string, 0)
     walkFn := func(path string, d fs.DirEntry, err error) error {
@@ -31,7 +30,6 @@ func (s *AppServer) RunMigrations(dir string) error {
         b, err := os.ReadFile(p)
         if err != nil { return fmt.Errorf("read migration %s: %w", p, err) }
         sqlText := string(b)
-        // naive split by ';' keeping it simple; ignore empty tail chunks
         chunks := strings.Split(sqlText, ";")
         for _, c := range chunks {
             stmt := strings.TrimSpace(c)

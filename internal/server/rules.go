@@ -12,13 +12,11 @@ import (
     "github.com/PhucNguyen204/EDR_V2/engine_sigma_by_golang/dag"
 )
 
-// LoadRulesF DromDir walks a directory recursively, compiles all .yml/.yaml files
-// into a single ruleset, builds a newAG engine, and swaps it.
-// Returns (loaded_count, skipped_count, error).
-func (s *AppServer) LoadRulesFromDir(ctx context.Context, dir string) (int, int, error) {
-    c := compiler.New()
-    loaded, skipped := 0, 0
 
+func (s *AppServer) LoadRulesFromDir(ctx context.Context, dir string) (int, int, error) {
+    c := compiler.New() 
+    loaded, skipped := 0, 0
+    //duyet de quy
     err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
         if err != nil { return err }
         if d.IsDir() { return nil }
@@ -31,8 +29,8 @@ func (s *AppServer) LoadRulesFromDir(ctx context.Context, dir string) (int, int,
             skipped++
             return nil
         }
+        // goi ham compile de kiem tra tinh hop le cua rule (ho tro ca multi-doc & correlation)
         if _, rerr := c.CompileRule(string(b)); rerr != nil {
-            // Skip unsupported rules but keep going
             skipped++
             return nil
         }
@@ -40,22 +38,23 @@ func (s *AppServer) LoadRulesFromDir(ctx context.Context, dir string) (int, int,
         return nil
     })
     if err != nil { return loaded, skipped, fmt.Errorf("walk dir: %w", err) }
-
+    // chuyen doi sang ruleset (bao gom correlation)
     rs := c.IntoRuleset()
-    // populate metadata for API enrichment
+    // luu metadata//   
     s.SetRuleMetaFromRuleset(rs)
-    // upsert rules metadata to DB for durable event_rules mapping
+    // nap correlation manager
+    s.SetCorrelationsFromRuleset(rs)
     if err := s.UpsertRules(ctx, rs); err != nil {
         return loaded, skipped, fmt.Errorf("upsert rules: %w", err)
     }
+    // chuyen doi sang dag engine
     newEngine, err := dag.FromRuleset(rs, dag.DefaultEngineConfig())
     if err != nil { return loaded, skipped, err }
     s.swapEngine(newEngine)
     log.Printf("rules loaded into DAG: rules=%d nodes=%d primitives=%d prefilter_patterns=%d", newEngine.RuleCount(), newEngine.NodeCount(), newEngine.PrimitiveCount(), newEngine.PrefilterPatternCount())
     return loaded, skipped, nil
 }
-
-// UpsertRules writes or updates rules metadata into the rules table
+// them vao db
 func (s *AppServer) UpsertRules(ctx context.Context, rs *ir.CompiledRuleset) error {
     for _, r := range rs.Rules {
         uid := r.RuleUID
@@ -72,4 +71,3 @@ func (s *AppServer) UpsertRules(ctx context.Context, rs *ir.CompiledRuleset) err
     }
     return nil
 }
-
