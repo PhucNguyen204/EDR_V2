@@ -227,6 +227,11 @@ func (s *AppServer) handleIngest(w http.ResponseWriter, r *http.Request) {
 		}
 		// Store raw event (optional)
 		eventID, _ := s.insertEvent(r.Context(), ep.EndpointID, ev)
+		if s.procTree != nil {
+			if evt, ok := processtree.ExtractEventFromLog(ep.EndpointID, ev); ok {
+				s.procTree.Upsert(evt)
+			}
+		}
 		// Evaluate
 		s.evalMu.Lock()
 		res, err := eng.Evaluate(ev)
