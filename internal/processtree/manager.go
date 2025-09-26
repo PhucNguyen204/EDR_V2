@@ -54,13 +54,29 @@ type endpointTree struct {
 
 // Manager dieu phoi cay tien trinh theo tung endpoint.
 type Manager struct {
-	mu        sync.RWMutex
-	endpoints map[string]*endpointTree
+	mu         sync.RWMutex
+	endpoints  map[string]*endpointTree
+	conditions *ProcessTreeConditions
+	analyzer   *ProcessTreeAnalyzer
 }
 
 // NewManager tao doi tuong quan ly moi.
 func NewManager() *Manager {
-	return &Manager{endpoints: make(map[string]*endpointTree)}
+	conditions := DefaultProcessTreeConditions()
+	return &Manager{
+		endpoints:  make(map[string]*endpointTree),
+		conditions: conditions,
+		analyzer:   NewProcessTreeAnalyzer(conditions),
+	}
+}
+
+// NewManagerWithConditions tao manager với điều kiện tùy chỉnh.
+func NewManagerWithConditions(conditions *ProcessTreeConditions) *Manager {
+	return &Manager{
+		endpoints:  make(map[string]*endpointTree),
+		conditions: conditions,
+		analyzer:   NewProcessTreeAnalyzer(conditions),
+	}
 }
 
 func (m *Manager) getOrCreateEndpointTree(endpointID string) *endpointTree {
@@ -83,6 +99,11 @@ func (m *Manager) Upsert(evt Event) {
 	}
 	if evt.Timestamp.IsZero() {
 		evt.Timestamp = time.Now().UTC()
+	}
+
+	// Kiểm tra điều kiện trước khi thêm vào tree
+	if !m.conditions.ShouldIncludeProcess(evt) {
+		return
 	}
 
 	m.mu.Lock()
@@ -139,6 +160,9 @@ func (m *Manager) Upsert(evt Event) {
 		}
 		node.ParentKey = ""
 	}
+
+	// Process tree được xây dựng từ TẤT CẢ events có chứa thông tin process
+	// Không cần correlation engine - chỉ cần lưu trữ và phân tích
 }
 
 func (t *endpointTree) ensureNode(key string) *Node {
@@ -240,4 +264,131 @@ func buildSnapshot(node *Node) TreeSnapshot {
 	}
 	snap.Children = children
 	return snap
+}
+
+// AnalyzeEndpoint phân tích process tree của một endpoint
+func (m *Manager) AnalyzeEndpoint(endpointID string) (*AnalysisResult, error) {
+	return m.analyzer.AnalyzeTree(m, endpointID)
+}
+
+// Process tree không cần correlation engine
+// Tất cả events có chứa process info đều được xây dựng thành tree
+
+// GetProcessTreeStats trả về thống kê tổng quan của process tree
+func (m *Manager) GetProcessTreeStats() map[string]interface{} {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	stats := map[string]interface{}{
+		"total_endpoints":      len(m.endpoints),
+		"total_processes":      0,
+		"suspicious_processes": 0,
+		"max_tree_depth":       0,
+		"endpoint_stats":       make(map[string]interface{}),
+	}
+
+	for endpointID, tree := range m.endpoints {
+		endpointStats := map[string]interface{}{
+			"total_processes":      len(tree.nodes),
+			"suspicious_processes": 0,
+			"max_depth":            0,
+		}
+
+		// Đếm suspicious processes
+		for _, node := range tree.nodes {
+			if m.conditions.IsSuspiciousProcess(Event{
+				Executable:  node.Executable,
+				CommandLine: node.CommandLine,
+				Timestamp:   node.LastSeen,
+			}) {
+				endpointStats["suspicious_processes"] = endpointStats["suspicious_processes"].(int) + 1
+			}
+		}
+
+		stats["total_processes"] = stats["total_processes"].(int) + len(tree.nodes)
+		stats["suspicious_processes"] = stats["suspicious_processes"].(int) + endpointStats["suspicious_processes"].(int)
+		stats["endpoint_stats"].(map[string]interface{})[endpointID] = endpointStats
+	}
+
+	return stats
+}
+
+// GetSuspiciousProcesses trả về danh sách các process đáng ngờ
+func (m *Manager) GetSuspiciousProcesses(endpointID string) []*Node {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	tree, exists := m.endpoints[endpointID]
+	if !exists {
+		return nil
+	}
+
+	var suspiciousProcesses []*Node
+	for _, node := range tree.nodes {
+		if m.conditions.IsSuspiciousProcess(Event{
+			Executable:  node.Executable,
+			CommandLine: node.CommandLine,
+			Timestamp:   node.LastSeen,
+		}) {
+			suspiciousProcesses = append(suspiciousProcesses, node)
+		}
+	}
+
+	return suspiciousProcesses
+}
+
+// GetProcessChain trả về chuỗi process từ root đến node được chỉ định
+func (m *Manager) GetProcessChain(endpointID string, processKey string) []*Node {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	tree, exists := m.endpoints[endpointID]
+	if !exists {
+		return nil
+	}
+
+	node, exists := tree.nodes[processKey]
+	if !exists {
+		return nil
+	}
+
+	var chain []*Node
+	current := node
+
+	// Đi ngược lên root
+	for current != nil {
+		chain = append([]*Node{current}, chain...)
+		if current.ParentKey != "" {
+			current = tree.nodes[current.ParentKey]
+		} else {
+			current = nil
+		}
+	}
+
+	return chain
+}
+
+// GetProcessChildren trả về tất cả các con của một process
+func (m *Manager) GetProcessChildren(endpointID string, processKey string) []*Node {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	tree, exists := m.endpoints[endpointID]
+	if !exists {
+		return nil
+	}
+
+	node, exists := tree.nodes[processKey]
+	if !exists {
+		return nil
+	}
+
+	var children []*Node
+	for _, child := range node.Children {
+		children = append(children, child)
+		// Đệ quy lấy các con của con
+		children = append(children, m.GetProcessChildren(endpointID, child.Key)...)
+	}
+
+	return children
 }

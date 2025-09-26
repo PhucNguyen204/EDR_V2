@@ -1,0 +1,64 @@
+﻿# Node.js dependencies
+frontend/node_modules/
+frontend/build/
+frontend/dist/
+
+# Logs and cache
+*.log
+logs/
+cache/
+temp/
+tmp/
+
+# Vector and Winlogbeat logs
+C:/Vector/
+C:/Winlogbeat/
+C:/Vector/out/
+C:/Winlogbeat/logs/
+
+# Python virtual environment
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Git
+.git/
+.gitignore
+
+# Docker
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Test files
+test/
+tests/
+*_test.go
+*_test.py
+
+# Documentation
+README.md
+*.md
+docs/
+
+# Backup files
+*.backup
+*.bak
+*.old

@@ -10,6 +10,9 @@ import (
 // ExtractEventFromLog chuyen log map thanh Event phuc vu cap nhat cay.
 func ExtractEventFromLog(endpointID string, raw map[string]any) (Event, bool) {
 	evt := Event{EndpointID: endpointID}
+
+	// Thử các cấu trúc khác nhau của event
+	// 1. Cấu trúc ECS chuẩn
 	evt.EntityID = toString(resolve(raw, "process.entity_id"))
 	evt.ParentEntityID = toString(resolve(raw, "process.parent.entity_id"))
 	evt.PID = normalizePID(resolve(raw, "process.pid"))
@@ -17,6 +20,54 @@ func ExtractEventFromLog(endpointID string, raw map[string]any) (Event, bool) {
 	evt.Name = toString(resolve(raw, "process.name"))
 	evt.Executable = toString(resolve(raw, "process.executable"))
 	evt.CommandLine = toString(resolve(raw, "process.command_line"))
+
+	// 2. Cấu trúc từ Vector transform (event_data)
+	if evt.PID == "" {
+		evt.PID = normalizePID(resolve(raw, "event_data.ProcessId"))
+	}
+	if evt.PPID == "" {
+		evt.PPID = normalizePID(resolve(raw, "event_data.ParentProcessId"))
+	}
+	if evt.Executable == "" {
+		evt.Executable = toString(resolve(raw, "event_data.Image"))
+	}
+	if evt.CommandLine == "" {
+		evt.CommandLine = toString(resolve(raw, "event_data.CommandLine"))
+	}
+	if evt.Name == "" {
+		evt.Name = toString(resolve(raw, "event_data.OriginalFileName"))
+	}
+
+	// 3. Cấu trúc từ winlog.event_data
+	if evt.PID == "" {
+		evt.PID = normalizePID(resolve(raw, "winlog.event_data.ProcessId"))
+	}
+	if evt.PPID == "" {
+		evt.PPID = normalizePID(resolve(raw, "winlog.event_data.ParentProcessId"))
+	}
+	if evt.Executable == "" {
+		evt.Executable = toString(resolve(raw, "winlog.event_data.Image"))
+	}
+	if evt.CommandLine == "" {
+		evt.CommandLine = toString(resolve(raw, "winlog.event_data.CommandLine"))
+	}
+	if evt.Name == "" {
+		evt.Name = toString(resolve(raw, "winlog.event_data.OriginalFileName"))
+	}
+
+	// 4. Sử dụng ProcessGuid làm EntityID nếu có
+	if evt.EntityID == "" {
+		evt.EntityID = toString(resolve(raw, "event_data.ProcessGuid"))
+	}
+	if evt.EntityID == "" {
+		evt.EntityID = toString(resolve(raw, "winlog.event_data.ProcessGuid"))
+	}
+	if evt.ParentEntityID == "" {
+		evt.ParentEntityID = toString(resolve(raw, "event_data.ParentProcessGuid"))
+	}
+	if evt.ParentEntityID == "" {
+		evt.ParentEntityID = toString(resolve(raw, "winlog.event_data.ParentProcessGuid"))
+	}
 
 	if evt.EntityID == "" && evt.PID == "" {
 		// Khong du thong tin de ghep vao cay.

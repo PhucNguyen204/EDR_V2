@@ -1,0 +1,17 @@
+Get-Process | Where-Object {$_.ProcessName -like "*vector*"} | Stop-Process -Force -ErrorAction SilentlyContinue
+
+# 2. Chờ 3 giây
+Start-Sleep -Seconds 3
+
+# 3. Start Vector với config mới
+Start-Process -FilePath "C:\Vector\bin\vector.exe" -ArgumentList "--config", "C:\Vector\vector.toml" -WindowStyle Hidden
+
+# 4. Chờ 5 giây
+Start-Sleep -Seconds 5
+
+# 5. Kiểm tra Vector process
+Get-Process | Where-Object {$_.ProcessName -like "*vector*"} | Select-Object ProcessName, Id, CPU, WorkingSet | Format-Table -AutoSize
+
+
+
+Start-Process -FilePath "C:\Vector\bin\vector.exe" -ArgumentList "--config", "C:\Vector\vector.toml" -WindowStyle Hidden

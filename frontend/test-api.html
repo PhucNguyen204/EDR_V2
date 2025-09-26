@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>EDR API Test</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        .test-section { margin: 20px 0; padding: 15px; border: 1px solid #ddd; border-radius: 5px; }
+        .success { background-color: #d4edda; border-color: #c3e6cb; }
+        .error { background-color: #f8d7da; border-color: #f5c6cb; }
+        .loading { background-color: #fff3cd; border-color: #ffeaa7; }
+        pre { background-color: #f8f9fa; padding: 10px; border-radius: 3px; overflow-x: auto; }
+    </style>
+</head>
+<body>
+    <h1>EDR API Test</h1>
+    
+    <div id="stats-test" class="test-section loading">
+        <h3>Stats API Test</h3>
+        <p>Loading...</p>
+    </div>
+    
+    <div id="alerts-test" class="test-section loading">
+        <h3>Alerts API Test</h3>
+        <p>Loading...</p>
+    </div>
+    
+    <div id="rules-test" class="test-section loading">
+        <h3>Rules API Test</h3>
+        <p>Loading...</p>
+    </div>
+
+    <script>
+        async function testAPI() {
+            // Test Stats API
+            try {
+                const statsResponse = await fetch('http://localhost:8080/api/v1/stats');
+                const statsData = await statsResponse.json();
+                
+                document.getElementById('stats-test').innerHTML = `
+                    <h3>Stats API Test</h3>
+                    <p>✅ Success!</p>
+                    <p>Rules: ${statsData.rule_count || 0}</p>
+                    <p>Nodes: ${statsData.node_count || 0}</p>
+                    <p>Correlation Windows: ${statsData.correlation_windows || 0}</p>
+                    <pre>${JSON.stringify(statsData, null, 2)}</pre>
+                `;
+                document.getElementById('stats-test').className = 'test-section success';
+            } catch (error) {
+                document.getElementById('stats-test').innerHTML = `
+                    <h3>Stats API Test</h3>
+                    <p>❌ Error: ${error.message}</p>
+                `;
+                document.getElementById('stats-test').className = 'test-section error';
+            }
+
+            // Test Alerts API
+            try {
+                const alertsResponse = await fetch('http://localhost:8080/api/v1/detections?limit=5');
+                const alertsData = await alertsResponse.json();
+                
+                document.getElementById('alerts-test').innerHTML = `
+                    <h3>Alerts API Test</h3>
+                    <p>✅ Success! Found ${alertsData.length} alerts</p>
+                    ${alertsData.length > 0 ? `
+                        <p>First alert: ${alertsData[0].rule_name}</p>
+                        <p>Severity: ${alertsData[0].severity}</p>
+                        <p>Time: ${new Date(alertsData[0].occurred_at).toLocaleString()}</p>
+                    ` : '<p>No alerts found</p>'}
+                    <pre>${JSON.stringify(alertsData.slice(0, 2), null, 2)}</pre>
+                `;
+                document.getElementById('alerts-test').className = 'test-section success';
+            } catch (error) {
+                document.getElementById('alerts-test').innerHTML = `
+                    <h3>Alerts API Test</h3>
+                    <p>❌ Error: ${error.message}</p>
+                `;
+                document.getElementById('alerts-test').className = 'test-section error';
+            }
+
+            // Test Rules API
+            try {
+                const rulesResponse = await fetch('http://localhost:8080/api/v1/rules');
+                const rulesData = await rulesResponse.json();
+                
+                document.getElementById('rules-test').innerHTML = `
+                    <h3>Rules API Test</h3>
+                    <p>✅ Success!</p>
+                    <p>Rules: ${rulesData.rules || 0}</p>
+                    <p>Nodes: ${rulesData.nodes || 0}</p>
+                    <pre>${JSON.stringify(rulesData, null, 2)}</pre>
+                `;
+                document.getElementById('rules-test').className = 'test-section success';
+            } catch (error) {
+                document.getElementById('rules-test').innerHTML = `
+                    <h3>Rules API Test</h3>
+                    <p>❌ Error: ${error.message}</p>
+                `;
+                document.getElementById('rules-test').className = 'test-section error';
+            }
+        }
+
+        // Run test when page loads
+        testAPI();
+    </script>
+</body>
+</html>

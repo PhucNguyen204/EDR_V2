@@ -1,0 +1,127 @@
+# Winlogbeat Configuration for Security Events
+winlogbeat.event_logs:
+  # Sysmon Events
+  - name: Microsoft-Windows-Sysmon/Operational
+    ignore_older: 24h
+    processors:
+      - add_host_metadata:
+          when.not.contains.tags: forwarded
+
+  # Security Events - Authentication & Logon
+  - name: Security
+    ignore_older: 24h
+    # Event IDs for authentication, logon, privilege escalation
+    include_xml: true
+    processors:
+      - add_host_metadata:
+          when.not.contains.tags: forwarded
+
+  # PowerShell Events
+  - name: Microsoft-Windows-PowerShell/Operational
+    ignore_older: 24h
+    processors:
+      - add_host_metadata:
+          when.not.contains.tags: forwarded
+
+  # Windows Defender Events
+  - name: Microsoft-Windows-Windows Defender/Operational
+    ignore_older: 24h
+    processors:
+      - add_host_metadata:
+          when.not.contains.tags: forwarded
+
+  # Application Events (for suspicious processes)
+  - name: Application
+    ignore_older: 24h
+    processors:
+      - add_host_metadata:
+          when.not.contains.tags: forwarded
+
+  # System Events (for service changes, etc.)
+  - name: System
+    ignore_older: 24h
+    processors:
+      - add_host_metadata:
+          when.not.contains.tags: forwarded
+
+  # OpenSSH Events - Authentication failures
+  - name: OpenSSH/Operational
+    ignore_older: 24h
+    processors:
+      - add_host_metadata:
+          when.not.contains.tags: forwarded
+
+# Output to JSON files
+output.file:
+  path: "C:\\Winlogbeat\\logs"
+  filename: "security-events.json"
+  codec.json:
+    pretty: false
+
+# Logging
+logging.level: info
+logging.to_files: true
+logging.files:
+  path: C:\Winlogbeat\logs
+  name: winlogbeat.log
+  keepfiles: 7
+  rotateeverybytes: 10485760
+
+# Processors để chuẩn hóa dữ liệu
+processors:
+  # Add host metadata
+  - add_host_metadata:
+      when.not.contains.tags: forwarded
+  
+  # Add timestamp
+  - timestamp:
+      field: '@timestamp'
+      layouts:
+        - '2006-01-02T15:04:05.000Z'
+      test:
+        - '2023-01-01T00:00:00.000Z'
+
+  # Rename fields để tương thích với EDR engine
+  - rename:
+      fields:
+        - from: "host.name"
+          to: "host_name"
+        - from: "host.ip"
+          to: "ip"
+        - from: "@timestamp"
+          to: "timestamp"
+        - from: "winlog.event_id"
+          to: "event_id"
+        - from: "winlog.provider_name"
+          to: "provider_name"
+        - from: "winlog.channel"
+          to: "channel"
+
+  # Flatten winlog.event_data
+  - script:
+      lang: javascript
+      source: |
+        function process(event) {
+          // Flatten winlog.event_data fields
+          var eventData = event.Get("winlog.event_data");
+          if (eventData != null) {
+            for (var key in eventData) {
+              event.Put("event_data." + key, eventData[key]);
+            }
+          }
+          
+          // Add endpoint_id
+          event.Put("endpoint_id", event.Get("host.name"));
+          
+          // Add agent info
+          event.Put("agent.version", "winlogbeat-8.11.0");
+          
+          return event;
+        }
+
+# Setup template
+setup.template.settings:
+  index.number_of_shards: 1
+
+# Disable ILM
+setup.ilm.enabled: false

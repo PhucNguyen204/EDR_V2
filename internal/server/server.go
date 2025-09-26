@@ -20,18 +20,17 @@ import (
 )
 
 type AppServer struct {
-    db       *sql.DB
-    engine   *dag.DagEngine
-    mu       sync.RWMutex        // protects engine swap
-    evalMu   sync.Mutex          // serialize evaluator usage (not goroutine-safe)
-    ruleMeta map[uint32]RuleMeta // metadata by numeric RuleId
-    procTree *processtree.Manager
-    corrMgr  *CorrelationManager
-    ruleName map[uint32]string // rule id -> rule name
+	db       *sql.DB
+	engine   *dag.DagEngine
+	mu       sync.RWMutex        // protects engine swap
+	evalMu   sync.Mutex          // serialize evaluator usage (not goroutine-safe)
+	ruleMeta map[uint32]RuleMeta // metadata by numeric RuleId
+	procTree *processtree.Manager
+	ruleName map[uint32]string // rule id -> rule name
 }
 
 func NewAppServer(db *sql.DB, engine *dag.DagEngine) *AppServer {
-    return &AppServer{db: db, engine: engine, ruleMeta: make(map[uint32]RuleMeta), procTree: processtree.NewManager(), ruleName: make(map[uint32]string)}
+	return &AppServer{db: db, engine: engine, ruleMeta: make(map[uint32]RuleMeta), procTree: processtree.NewManager(), ruleName: make(map[uint32]string)}
 }
 
 type RuleMeta struct {
@@ -41,15 +40,35 @@ type RuleMeta struct {
 	Desc  string
 }
 
+// CORS middleware
+func (s *AppServer) corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		next(w, r)
+	}
+}
+
 // RegisterRoutes wires HTTP handlers.
 func (s *AppServer) RegisterRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("/healthz", s.handleHealth)
-	mux.HandleFunc("/api/v1/stats", s.handleStats)
-	mux.HandleFunc("/api/v1/endpoints", s.handleListEndpoints)
-	mux.HandleFunc("/api/v1/detections", s.handleListDetections)
-	mux.HandleFunc("/api/v1/process_tree", s.handleProcessTree)
-	mux.HandleFunc("/api/v1/ingest", s.handleIngest)
-	mux.HandleFunc("/api/v1/rules", s.handleRules)
+	mux.HandleFunc("/healthz", s.corsMiddleware(s.handleHealth))
+	mux.HandleFunc("/api/v1/stats", s.corsMiddleware(s.handleStats))
+	mux.HandleFunc("/api/v1/endpoints", s.corsMiddleware(s.handleListEndpoints))
+	mux.HandleFunc("/api/v1/detections", s.corsMiddleware(s.handleListDetections))
+	mux.HandleFunc("/api/v1/process_tree", s.corsMiddleware(s.handleProcessTree))
+	mux.HandleFunc("/api/v1/process_tree/analyze", s.corsMiddleware(s.handleProcessTreeAnalyze))
+	mux.HandleFunc("/api/v1/process_tree/suspicious", s.corsMiddleware(s.handleSuspiciousProcesses))
+	mux.HandleFunc("/api/v1/ingest", s.corsMiddleware(s.handleIngest))
+	mux.HandleFunc("/api/v1/ingest/batch", s.corsMiddleware(s.handleBatchIngest))
+	mux.HandleFunc("/api/v1/rules", s.corsMiddleware(s.handleRules))
+	mux.HandleFunc("/api/v1/rules/list", s.corsMiddleware(s.handleListRules))
 }
 
 func (s *AppServer) currentEngine() *dag.DagEngine {
@@ -66,28 +85,27 @@ func (s *AppServer) swapEngine(e *dag.DagEngine) {
 
 // SetRuleMetaFromRuleset populates in-memory metadata map from compiled ruleset
 func (s *AppServer) SetRuleMetaFromRuleset(rs *ir.CompiledRuleset) {
-    m := make(map[uint32]RuleMeta, len(rs.Rules))
-    rn := make(map[uint32]string, len(rs.Rules))
-    for _, r := range rs.Rules {
-        m[uint32(r.RuleId)] = RuleMeta{
-            UID:   r.RuleUID,
-            Title: r.Title,
-            Level: r.Level,
-            Desc:  r.Description,
-        }
-        if r.RuleName != "" { rn[uint32(r.RuleId)] = r.RuleName } else if r.Title != "" { rn[uint32(r.RuleId)] = r.Title } else { rn[uint32(r.RuleId)] = fmt.Sprintf("rule-%d", r.RuleId) }
-    }
-    s.mu.Lock()
-    s.ruleMeta = m
-    s.ruleName = rn
-    s.mu.Unlock()
-}
-
-// Set correlations into manager
-func (s *AppServer) SetCorrelationsFromRuleset(rs *ir.CompiledRuleset) {
-    s.mu.Lock()
-    defer s.mu.Unlock()
-    s.corrMgr = NewCorrelationManagerFromIR(rs.Correlations)
+	m := make(map[uint32]RuleMeta, len(rs.Rules))
+	rn := make(map[uint32]string, len(rs.Rules))
+	for _, r := range rs.Rules {
+		m[uint32(r.RuleId)] = RuleMeta{
+			UID:   r.RuleUID,
+			Title: r.Title,
+			Level: r.Level,
+			Desc:  r.Description,
+		}
+		if r.RuleName != "" {
+			rn[uint32(r.RuleId)] = r.RuleName
+		} else if r.Title != "" {
+			rn[uint32(r.RuleId)] = r.Title
+		} else {
+			rn[uint32(r.RuleId)] = fmt.Sprintf("rule-%d", r.RuleId)
+		}
+	}
+	s.mu.Lock()
+	s.ruleMeta = m
+	s.ruleName = rn
+	s.mu.Unlock()
 }
 
 // ---- Handlers ----
@@ -100,12 +118,14 @@ func (s *AppServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 func (s *AppServer) handleStats(w http.ResponseWriter, r *http.Request) {
 	type statsResp struct {
-		NodesEvaluated       int `json:"nodes_evaluated"`
-		PrimitiveEvaluations int `json:"primitive_evaluations"`
-		PrefilterHits        int `json:"prefilter_hits"`
-		PrefilterMisses      int `json:"prefilter_misses"`
-		RuleCount            int `json:"rule_count"`
-		NodeCount            int `json:"node_count"`
+		NodesEvaluated       int            `json:"nodes_evaluated"`
+		PrimitiveEvaluations int            `json:"primitive_evaluations"`
+		PrefilterHits        int            `json:"prefilter_hits"`
+		PrefilterMisses      int            `json:"prefilter_misses"`
+		RuleCount            int            `json:"rule_count"`
+		NodeCount            int            `json:"node_count"`
+		CorrelationWindows   int            `json:"correlation_windows"`
+		CorrelationStats     map[string]int `json:"correlation_stats"`
 	}
 	eng := s.currentEngine()
 	ne, pe, ph, pm := eng.Stats()
@@ -113,6 +133,8 @@ func (s *AppServer) handleStats(w http.ResponseWriter, r *http.Request) {
 		NodesEvaluated: ne, PrimitiveEvaluations: pe,
 		PrefilterHits: ph, PrefilterMisses: pm,
 		RuleCount: eng.RuleCount(), NodeCount: eng.NodeCount(),
+		CorrelationWindows: eng.GetCorrelationWindowCount(),
+		CorrelationStats:   eng.GetCorrelationStats(),
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -199,6 +221,53 @@ func (s *AppServer) handleListDetections(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, out)
 }
 
+func (s *AppServer) handleListRules(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	limit := 1000
+	if v := q.Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 5000 {
+			limit = n
+		}
+	}
+
+	rows, err := s.db.QueryContext(r.Context(), `SELECT id, rule_uid, title, level, description, created_at FROM rules ORDER BY id DESC LIMIT $1`, limit)
+	if err != nil {
+		writeErr(w, 500, err)
+		return
+	}
+	defer rows.Close()
+
+	type rule struct {
+		ID          int32     `json:"id"`
+		RuleUID     string    `json:"rule_uid"`
+		Title       string    `json:"title"`
+		Level       string    `json:"level"`
+		Description string    `json:"description"`
+		CreatedAt   time.Time `json:"created_at"`
+		Count       int       `json:"count"`
+	}
+
+	out := []rule{}
+	for rows.Next() {
+		var ruleItem rule
+		if err := rows.Scan(&ruleItem.ID, &ruleItem.RuleUID, &ruleItem.Title, &ruleItem.Level, &ruleItem.Description, &ruleItem.CreatedAt); err != nil {
+			writeErr(w, 500, err)
+			return
+		}
+
+		// Count how many times this rule was triggered
+		var count int
+		err := s.db.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM detections WHERE rule_id = $1`, ruleItem.ID).Scan(&count)
+		if err != nil {
+			count = 0
+		}
+		ruleItem.Count = count
+
+		out = append(out, ruleItem)
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
 // handleIngest accepts a JSON object or array of objects.
 func (s *AppServer) handleIngest(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -231,64 +300,200 @@ func (s *AppServer) handleIngest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	eng := s.currentEngine()
-    for _, ev := range events {
+	for _, ev := range events {
 		// Track endpoint
 		ep := extractEndpoint(ev)
 		if ep.EndpointID != "" {
 			_ = s.upsertEndpoint(r.Context(), ep)
 		}
+
+		// DEBUG: Log tất cả events được ingest
+		log.Printf("INGEST EVENT: endpoint=%s event_type=%v event_id=%v process_id=%v",
+			ep.EndpointID,
+			getStringValue(ev, "event_type"),
+			getStringValue(ev, "EventID"),
+			getStringValue(ev, "event_data.ProcessId"))
+
 		// Store raw event (optional)
 		eventID, _ := s.insertEvent(r.Context(), ep.EndpointID, ev)
+		if s.procTree != nil {
+			if evt, ok := processtree.ExtractEventFromLog(ep.EndpointID, ev); ok {
+				log.Printf("PROCESS TREE: Added process endpoint=%s pid=%s ppid=%s executable=%s",
+					evt.EndpointID, evt.PID, evt.PPID, evt.Executable)
+				s.procTree.Upsert(evt)
+			} else {
+				log.Printf("PROCESS TREE: Skipped event endpoint=%s (no process info)", ep.EndpointID)
+			}
+		}
+		// Evaluate with correlation
+		s.evalMu.Lock()
+		res, correlationAlerts, err := eng.EvaluateWithCorrelation(ev)
+		s.evalMu.Unlock()
+		if err != nil {
+			log.Printf("evaluate error: %v", err)
+			continue
+		}
+		if len(res.MatchedRules) > 0 {
+			// Console log anomaly
+			log.Printf("ALERT endpoint=%s rules=%v nodes=%d prims=%d", ep.EndpointID, res.MatchedRules, res.NodesEvaluated, res.PrimitiveEvaluations)
+			// Persist detections per matched rule
+			for _, rid := range res.MatchedRules {
+				// Get rule name from metadata
+				s.mu.RLock()
+				meta, ok := s.ruleMeta[uint32(rid)]
+				ruleName, hasRuleName := s.ruleName[uint32(rid)]
+				s.mu.RUnlock()
+
+				// Use rule name if available, otherwise use title
+				var finalRuleName string
+				if hasRuleName && ruleName != "" {
+					finalRuleName = ruleName
+				} else if ok && meta.Title != "" {
+					finalRuleName = meta.Title
+				} else {
+					finalRuleName = fmt.Sprintf("rule-%d", rid)
+				}
+
+				// Use rule level if available, otherwise use medium
+				severity := "medium"
+				if ok && meta.Level != "" {
+					severity = meta.Level
+				}
+
+				_ = s.insertDetection(r.Context(), ep.EndpointID, int32(rid), finalRuleName, severity, 0.7, ev)
+
+				// Also persist event_rules link if we have metadata UID
+				if ok && meta.UID != "" && eventID > 0 {
+					_ = s.insertEventRule(r.Context(), eventID, meta.UID)
+				}
+			}
+		}
+
+		// Process correlation alerts
+		for _, alert := range correlationAlerts {
+			log.Printf("CORRELATION ALERT: %s - %s (count: %d)", alert.Rule.Title, alert.Rule.Level, alert.Window.Count)
+
+			// Store correlation detection
+			ctx := map[string]any{
+				"correlation_rule": alert.Rule.Name,
+				"correlation_type": alert.Rule.Type,
+				"window_count":     alert.Window.Count,
+				"window_start":     alert.Window.Start,
+				"group_key":        alert.Window.GroupKey,
+				"events_in_window": len(alert.Window.Events),
+				"original_event":   ev,
+			}
+			_ = s.insertDetection(r.Context(), ep.EndpointID, 0, alert.Rule.Title, alert.Rule.Level, 0.9, ctx)
+		}
+
+		// Process tree được xây dựng từ TẤT CẢ events, không chỉ detected events
+		// Logic này đã được xử lý ở trên trong ExtractEventFromLog
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ingested": len(events)})
+}
+
+// handleBatchIngest processes a batch of events using the batch processor
+func (s *AppServer) handleBatchIngest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	dec := json.NewDecoder(r.Body)
+	dec.UseNumber()
+	var payload any
+	if err := dec.Decode(&payload); err != nil {
+		writeErr(w, 400, fmt.Errorf("invalid JSON: %w", err))
+		return
+	}
+
+	// Normalize to slice
+	var events []map[string]any
+	switch t := payload.(type) {
+	case map[string]any:
+		events = []map[string]any{t}
+	case []any:
+		events = make([]map[string]any, 0, len(t))
+		for _, it := range t {
+			if m, ok := it.(map[string]any); ok {
+				events = append(events, m)
+			}
+		}
+	default:
+		writeErr(w, 400, fmt.Errorf("payload must be object or array of objects"))
+		return
+	}
+
+	eng := s.currentEngine()
+
+	// Convert to []any for batch processing
+	eventSlice := make([]any, len(events))
+	for i, ev := range events {
+		eventSlice[i] = ev
+	}
+
+	// Process batch
+	s.evalMu.Lock()
+	batchResult, err := eng.ProcessBatch(eventSlice)
+	s.evalMu.Unlock()
+
+	if err != nil {
+		writeErr(w, 500, fmt.Errorf("batch processing error: %w", err))
+		return
+	}
+
+	// Store individual events and detections
+	for _, ev := range events {
+		// Track endpoint
+		ep := extractEndpoint(ev)
+		if ep.EndpointID != "" {
+			_ = s.upsertEndpoint(r.Context(), ep)
+		}
+		// Store raw event
+		_, _ = s.insertEvent(r.Context(), ep.EndpointID, ev)
 		if s.procTree != nil {
 			if evt, ok := processtree.ExtractEventFromLog(ep.EndpointID, ev); ok {
 				s.procTree.Upsert(evt)
 			}
 		}
-		// Evaluate
-        s.evalMu.Lock()
-        res, err := eng.Evaluate(ev)
-        s.evalMu.Unlock()
-        if err != nil {
-            log.Printf("evaluate error: %v", err)
-            continue
-        }
-        if len(res.MatchedRules) > 0 {
-			// Console log anomaly
-			log.Printf("ALERT endpoint=%s rules=%v nodes=%d prims=%d", ep.EndpointID, res.MatchedRules, res.NodesEvaluated, res.PrimitiveEvaluations)
-			// Persist detections per matched rule
-            for _, rid := range res.MatchedRules {
-                _ = s.insertDetection(r.Context(), ep.EndpointID, int32(rid), "", "medium", 0.7, ev)
-                // Also persist event_rules link if we have metadata UID
-                s.mu.RLock()
-                meta, ok := s.ruleMeta[uint32(rid)]
-                s.mu.RUnlock()
-                if ok && meta.UID != "" && eventID > 0 {
-                    _ = s.insertEventRule(r.Context(), eventID, meta.UID)
-                }
-            }
-            // feed correlation manager
-            s.mu.RLock()
-            names := make([]string, 0, len(res.MatchedRules))
-            for _, rid := range res.MatchedRules { if n, ok := s.ruleName[uint32(rid)]; ok { names = append(names, n) } }
-            cm := s.corrMgr
-            s.mu.RUnlock()
-            if cm != nil {
-                hits := cm.Observe(ev, names, time.Now().UTC())
-                for _, h := range hits {
-                    // store detection for correlation hit with ruleName = title
-                    ctx := map[string]any{
-                        "correlation_id": h.correlationID,
-                        "group":         h.groupKey,
-                        "count":         h.count,
-                        "source_rule_names": names,
-                        "event":         ev,
-                    }
-                    _ = s.insertDetection(r.Context(), ep.EndpointID, 0, h.title, h.level, 0.9, ctx)
-                }
-            }
-        }
-    }
-	writeJSON(w, http.StatusOK, map[string]any{"ingested": len(events)})
+	}
+
+	// Store correlation alerts as detections
+	for _, alert := range batchResult.CorrelationAlerts {
+		log.Printf("BATCH CORRELATION ALERT: %s - %s (count: %d)", alert.Rule.Title, alert.Rule.Level, alert.Window.Count)
+
+		// Store correlation detection
+		ctx := map[string]any{
+			"correlation_rule": alert.Rule.Name,
+			"correlation_type": alert.Rule.Type,
+			"window_count":     alert.Window.Count,
+			"window_start":     alert.Window.Start,
+			"group_key":        alert.Window.GroupKey,
+			"events_in_window": len(alert.Window.Events),
+			"batch_processing": true,
+		}
+
+		// Get endpoint from first event in window
+		var endpointID string
+		if len(alert.Window.Events) > 0 {
+			if eventMap, ok := alert.Window.Events[0].Event.(map[string]any); ok {
+				ep := extractEndpoint(eventMap)
+				endpointID = ep.EndpointID
+			}
+		}
+
+		_ = s.insertDetection(r.Context(), endpointID, 0, alert.Rule.Title, alert.Rule.Level, 0.9, ctx)
+	}
+
+	// Return batch result
+	response := map[string]any{
+		"processed_events":   batchResult.ProcessedEvents,
+		"matched_rules":      batchResult.MatchedRules,
+		"correlation_alerts": len(batchResult.CorrelationAlerts),
+		"processing_time_ms": batchResult.ProcessingTime.Milliseconds(),
+	}
+
+	writeJSON(w, http.StatusOK, response)
 }
 
 // handleRules supports GET (list current counts) and POST (replace rules).
@@ -325,6 +530,11 @@ func (s *AppServer) handleRules(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, 500, err)
 			return
 		}
+
+		// Set rule metadata for batch processor
+		// Note: batchProcessor field is not exported, so we'll skip this for now
+		// TODO: Add method to DagEngine to set batch processor metadata
+
 		s.swapEngine(newEngine)
 		writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "rules": newEngine.RuleCount()})
 		return
@@ -461,6 +671,53 @@ func toString(v any) string {
 	}
 }
 
+// getStringValue lấy string value từ event map
+func getStringValue(ev map[string]any, key string) string {
+	if v, ok := ev[key]; ok {
+		return toString(v)
+	}
+	return ""
+}
+
+// extractProcessKey trích xuất process key từ event
+func (s *AppServer) extractProcessKey(ev map[string]any) string {
+	// Thử lấy entity_id trước
+	if entityID, ok := ev["process.entity_id"]; ok {
+		if entityIDStr, ok := entityID.(string); ok && entityIDStr != "" {
+			return entityIDStr
+		}
+	}
+
+	// Thử lấy PID
+	if pid, ok := ev["process.pid"]; ok {
+		if pidStr, ok := pid.(string); ok && pidStr != "" {
+			return "pid:" + pidStr
+		}
+	}
+
+	// Thử lấy từ winlog.event_data
+	if eventData, ok := ev["winlog.event_data"]; ok {
+		if eventDataMap, ok := eventData.(map[string]any); ok {
+			// Thử ProcessId
+			if processId, ok := eventDataMap["ProcessId"]; ok {
+				if processIdStr, ok := processId.(string); ok && processIdStr != "" {
+					return "pid:" + processIdStr
+				}
+			}
+
+			// Thử Image
+			if image, ok := eventDataMap["Image"]; ok {
+				if imageStr, ok := image.(string); ok && imageStr != "" {
+					// Tạo key từ image path
+					return "image:" + imageStr
+				}
+			}
+		}
+	}
+
+	return ""
+}
+
 func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
@@ -497,5 +754,61 @@ func (s *AppServer) handleProcessTree(w http.ResponseWriter, r *http.Request) {
 		"endpoint_id": endpointID,
 		"root":        rootKey,
 		"trees":       trees,
+	})
+}
+
+// handleProcessTreeAnalyze phân tích process tree của endpoint
+func (s *AppServer) handleProcessTreeAnalyze(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if s.procTree == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "process tree manager chua san sang"})
+		return
+	}
+
+	endpointID := r.URL.Query().Get("endpoint_id")
+	if endpointID == "" {
+		writeErr(w, 400, fmt.Errorf("endpoint_id parameter required"))
+		return
+	}
+
+	analysis, err := s.procTree.AnalyzeEndpoint(endpointID)
+	if err != nil {
+		writeErr(w, 500, err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, analysis)
+}
+
+// Correlation không cần thiết cho process tree
+// Process tree được xây dựng từ TẤT CẢ events có chứa process info
+
+// handleSuspiciousProcesses lấy danh sách suspicious processes
+func (s *AppServer) handleSuspiciousProcesses(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if s.procTree == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "process tree manager chua san sang"})
+		return
+	}
+
+	endpointID := r.URL.Query().Get("endpoint_id")
+	if endpointID == "" {
+		writeErr(w, 400, fmt.Errorf("endpoint_id parameter required"))
+		return
+	}
+
+	suspiciousProcesses := s.procTree.GetSuspiciousProcesses(endpointID)
+	processTreeStats := s.procTree.GetProcessTreeStats()
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"endpoint_id":          endpointID,
+		"suspicious_processes": suspiciousProcesses,
+		"process_tree_stats":   processTreeStats,
 	})
 }
