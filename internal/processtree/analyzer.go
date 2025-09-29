@@ -72,6 +72,8 @@ type ProcessStatistics struct {
 	AverageChildren       float64         `json:"average_children"`
 	MaxChildren           int             `json:"max_children"`
 	ProcessLifetimes      []time.Duration `json:"process_lifetimes"`
+	// internal counters (not exported)
+	totalChildrenInternal int
 }
 
 // AnalyzeTree phân tích toàn bộ process tree của endpoint
@@ -92,9 +94,10 @@ func (a *ProcessTreeAnalyzer) AnalyzeTree(manager *Manager, endpointID string) (
 		},
 	}
 
-	// Phân tích từng root process
+	// Ghi nhận số root và phân tích từng root process
+	result.RootProcesses = len(snapshots)
 	for _, snapshot := range snapshots {
-		a.analyzeNode(&snapshot, result, 0)
+		a.analyzeNode(&snapshot, result, 0, nil)
 	}
 
 	// Tính toán thống kê
@@ -110,7 +113,7 @@ func (a *ProcessTreeAnalyzer) AnalyzeTree(manager *Manager, endpointID string) (
 }
 
 // analyzeNode phân tích một node và các con của nó
-func (a *ProcessTreeAnalyzer) analyzeNode(node *TreeSnapshot, result *AnalysisResult, depth int) {
+func (a *ProcessTreeAnalyzer) analyzeNode(node *TreeSnapshot, result *AnalysisResult, depth int, execPath []string) {
 	result.TotalProcesses++
 
 	// Cập nhật độ sâu tối đa
@@ -132,9 +135,26 @@ func (a *ProcessTreeAnalyzer) analyzeNode(node *TreeSnapshot, result *AnalysisRe
 		result.ProcessStatistics.MostCommonExecutables[node.Executable]++
 	}
 
+	// Cập nhật thống kê số con thực tế
+	childCount := len(node.Children)
+	result.ProcessStatistics.totalChildrenInternal += childCount
+	if childCount > result.ProcessStatistics.MaxChildren {
+		result.ProcessStatistics.MaxChildren = childCount
+	}
+
+	// Tìm chuỗi nghi ngờ theo đường dẫn thực thi (cha -> con)
+	curExec := normalizeExecutable(node.Executable)
+	var newPath []string
+	if curExec != "" {
+		newPath = append(append([]string(nil), execPath...), curExec)
+		a.matchSuspiciousPatterns(newPath, node, result)
+	} else {
+		newPath = append([]string(nil), execPath...)
+	}
+
 	// Phân tích các con
 	for _, child := range node.Children {
-		a.analyzeNode(&child, result, depth+1)
+		a.analyzeNode(&child, result, depth+1, newPath)
 	}
 }
 
@@ -144,54 +164,86 @@ func (a *ProcessTreeAnalyzer) calculateStatistics(result *AnalysisResult) {
 		return
 	}
 
-	// Tính average children
-	totalChildren := 0
-	for _, count := range result.ProcessStatistics.MostCommonExecutables {
-		totalChildren += count
-	}
-	result.ProcessStatistics.AverageChildren = float64(totalChildren) / float64(result.TotalProcesses)
-
-	// Tìm max children
-	for _, count := range result.ProcessStatistics.MostCommonExecutables {
-		if count > result.ProcessStatistics.MaxChildren {
-			result.ProcessStatistics.MaxChildren = count
-		}
-	}
+	// Tính average children dựa trên số con thực tế đã cộng dồn
+	result.ProcessStatistics.AverageChildren = float64(result.ProcessStatistics.totalChildrenInternal) / float64(result.TotalProcesses)
 }
 
 // findSuspiciousChains tìm các chuỗi process đáng ngờ
 func (a *ProcessTreeAnalyzer) findSuspiciousChains(result *AnalysisResult) {
-	// Tìm các chuỗi process liên tiếp đáng ngờ
-	// Logic này có thể được mở rộng để tìm patterns phức tạp hơn
+	// No-op: phát hiện chuỗi đã được xử lý inline trong analyzeNode() bằng matchSuspiciousPatterns
+}
 
-	// Ví dụ: tìm chuỗi PowerShell -> cmd -> wmic
-	suspiciousPatterns := []struct {
-		pattern     []string
+// matchSuspiciousPatterns kiểm tra đường dẫn thực thi hiện tại có khớp các mẫu nghi ngờ không
+func (a *ProcessTreeAnalyzer) matchSuspiciousPatterns(path []string, node *TreeSnapshot, result *AnalysisResult) {
+	if len(path) == 0 {
+		return
+	}
+	patterns := []struct {
+		seq         []string
 		description string
-		riskLevel   string
+		risk        string
 	}{
-		{
-			pattern:     []string{"powershell.exe", "cmd.exe"},
-			description: "PowerShell spawning command prompt",
-			riskLevel:   "medium",
-		},
-		{
-			pattern:     []string{"cmd.exe", "wmic.exe"},
-			description: "Command prompt spawning WMIC",
-			riskLevel:   "high",
-		},
-		{
-			pattern:     []string{"powershell.exe", "certutil.exe"},
-			description: "PowerShell spawning certutil",
-			riskLevel:   "high",
-		},
+		{seq: []string{"winword.exe", "powershell.exe"}, description: "Office spawning PowerShell", risk: "high"},
+		{seq: []string{"excel.exe", "powershell.exe"}, description: "Office spawning PowerShell", risk: "high"},
+		{seq: []string{"outlook.exe", "powershell.exe"}, description: "Office spawning PowerShell", risk: "high"},
+		{seq: []string{"chrome.exe", "powershell.exe"}, description: "Browser spawning PowerShell", risk: "medium"},
+		{seq: []string{"msedge.exe", "powershell.exe"}, description: "Browser spawning PowerShell", risk: "medium"},
+		{seq: []string{"powershell.exe", "cmd.exe"}, description: "PowerShell spawning cmd", risk: "medium"},
+		{seq: []string{"cmd.exe", "wmic.exe"}, description: "cmd spawning WMIC", risk: "high"},
+		{seq: []string{"powershell.exe", "certutil.exe"}, description: "PowerShell spawning certutil", risk: "high"},
+		{seq: []string{"powershell.exe", "rundll32.exe"}, description: "PowerShell spawning rundll32", risk: "high"},
 	}
+	for _, p := range patterns {
+		if matchSuffix(path, p.seq) {
+			// Tạo chain đơn giản chứa node hiện tại
+			chain := SuspiciousChain{
+				ChainID:      fmt.Sprintf("chain-%d-%d", time.Now().UnixNano(), len(result.SuspiciousChains)+1),
+				StartTime:    node.FirstSeen,
+				EndTime:      node.LastSeen,
+				Duration:     node.LastSeen.Sub(node.FirstSeen),
+				ProcessCount: len(p.seq),
+				Processes: []ProcessInfo{{
+					Key:          node.Key,
+					PID:          node.PID,
+					Name:         node.Name,
+					Executable:   node.Executable,
+					CommandLine:  node.CommandLine,
+					Timestamp:    node.LastSeen,
+					IsSuspicious: true,
+				}},
+				RiskLevel:   p.risk,
+				Description: p.description,
+			}
+			result.SuspiciousChains = append(result.SuspiciousChains, chain)
+		}
+	}
+}
 
-	for _, pattern := range suspiciousPatterns {
-		// Tìm các chuỗi process phù hợp với pattern
-		// Logic này cần được implement dựa trên cấu trúc tree
-		_ = pattern // Placeholder
+func normalizeExecutable(exe string) string {
+	if exe == "" {
+		return ""
 	}
+	s := strings.ToLower(exe)
+	// strip path
+	lastSlash := strings.LastIndexAny(s, "\\/")
+	if lastSlash >= 0 && lastSlash+1 < len(s) {
+		s = s[lastSlash+1:]
+	}
+	return s
+}
+
+func matchSuffix(path []string, pattern []string) bool {
+	if len(pattern) == 0 || len(path) < len(pattern) {
+		return false
+	}
+	// compare tail
+	offset := len(path) - len(pattern)
+	for i := range pattern {
+		if path[offset+i] != pattern[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // findAnomalies tìm các bất thường trong process tree
@@ -248,9 +300,9 @@ func (a *ProcessTreeAnalyzer) GetTopSuspiciousProcesses(result *AnalysisResult, 
 func (a *ProcessTreeAnalyzer) GenerateReport(result *AnalysisResult) string {
 	var report strings.Builder
 
-	report.WriteString(fmt.Sprintf("Process Tree Analysis Report\n"))
-	report.WriteString(fmt.Sprintf("Endpoint: %s\n", result.EndpointID))
-	report.WriteString(fmt.Sprintf("Analysis Time: %s\n", result.AnalysisTimestamp.Format(time.RFC3339)))
+	report.WriteString("Process Tree Analysis Report\n")
+	report.WriteString("Endpoint: " + result.EndpointID + "\n")
+	report.WriteString("Analysis Time: " + result.AnalysisTimestamp.Format(time.RFC3339) + "\n")
 	report.WriteString(fmt.Sprintf("Total Processes: %d\n", result.TotalProcesses))
 	report.WriteString(fmt.Sprintf("Suspicious Processes: %d\n", result.SuspiciousProcesses))
 	report.WriteString(fmt.Sprintf("Tree Depth: %d\n", result.TreeDepth))

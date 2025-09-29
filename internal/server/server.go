@@ -307,22 +307,11 @@ func (s *AppServer) handleIngest(w http.ResponseWriter, r *http.Request) {
 			_ = s.upsertEndpoint(r.Context(), ep)
 		}
 
-		// DEBUG: Log tất cả events được ingest
-		log.Printf("INGEST EVENT: endpoint=%s event_type=%v event_id=%v process_id=%v",
-			ep.EndpointID,
-			getStringValue(ev, "event_type"),
-			getStringValue(ev, "EventID"),
-			getStringValue(ev, "event_data.ProcessId"))
-
 		// Store raw event (optional)
 		eventID, _ := s.insertEvent(r.Context(), ep.EndpointID, ev)
 		if s.procTree != nil {
 			if evt, ok := processtree.ExtractEventFromLog(ep.EndpointID, ev); ok {
-				log.Printf("PROCESS TREE: Added process endpoint=%s pid=%s ppid=%s executable=%s",
-					evt.EndpointID, evt.PID, evt.PPID, evt.Executable)
 				s.procTree.Upsert(evt)
-			} else {
-				log.Printf("PROCESS TREE: Skipped event endpoint=%s (no process info)", ep.EndpointID)
 			}
 		}
 		// Evaluate with correlation
@@ -330,7 +319,6 @@ func (s *AppServer) handleIngest(w http.ResponseWriter, r *http.Request) {
 		res, correlationAlerts, err := eng.EvaluateWithCorrelation(ev)
 		s.evalMu.Unlock()
 		if err != nil {
-			log.Printf("evaluate error: %v", err)
 			continue
 		}
 		if len(res.MatchedRules) > 0 {
